@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# SSH host keys (regenerated on first run if missing)
+ssh_host_key
+ssh_host_key.pub
+
+# Player save data
+saves/
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
