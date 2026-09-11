@@ -5,6 +5,7 @@ Command parser and handlers for the MUD Fishing Game
 import random
 import re
 import time
+import math
 from typing import Optional, Callable, Dict, List, TYPE_CHECKING
 from dataclasses import dataclass, field
 
@@ -77,10 +78,11 @@ class DelayStage:
 
 @dataclass
 class ReelChallenge:
-    """Interactive reeling phase with periodic direction checks."""
+    """Interactive reeling phase with harmful and beneficial events."""
     total_seconds: float
     response_seconds: float
-    failure: Callable[[str], tuple]
+    intelligence: int
+    wisdom: int
 
 
 @dataclass
@@ -148,6 +150,8 @@ class GameCommands:
             "fix": self.cmd_repair,
             "consider": self.cmd_consider,
             "con": self.cmd_consider,
+            "appraise": self.cmd_appraise,
+            "app": self.cmd_appraise,
             "drink": self.cmd_drink,  # Secret — beer level-up
             "gem": self.cmd_gem,  # Secret — socket gems into gear
             "say": self.cmd_say,
@@ -636,7 +640,7 @@ class GameCommands:
     def cmd_equip(self, player: Player, item_name: str) -> CommandResult:
         """Equip or wear an item, or wear all clothing into empty slots."""
         if not item_name:
-            return CommandResult("Equip what?")
+            return CommandResult(player.get_equipment_display())
         if item_name.lower().strip() in ("all", "*"):
             return CommandResult(player.wear_all())
         
@@ -927,6 +931,8 @@ class GameCommands:
         strength = player.get_effective_attribute("strength")
         dexterity = player.get_effective_attribute("dexterity")
         constitution = player.get_effective_attribute("constitution")
+        intelligence = player.get_effective_attribute("intelligence")
+        wisdom = player.get_effective_attribute("wisdom")
 
         # Bite wait: 2x old (100-pop)/12.5, reduced by Str and Dex
         base_bite = round(2 * (100 - population) / 12.5)
@@ -985,9 +991,14 @@ class GameCommands:
             )
             player.add_item(fish_copy)
             level_lines = player.record_fish_catch(fish_copy.weight)
+            level_progress = (
+                f"[{player.total_weight_caught:.1f}/"
+                f"{player.next_level_threshold():g}]"
+            )
             lines = [
                 f"*SPLASH*\nYou reel in a {fish_copy.display_name}! "
-                f"({fish_copy.weight} lbs){excitement}{degrade_text}"
+                f"({fish_copy.weight} lbs) {level_progress}"
+                f"{excitement}{degrade_text}"
             ]
 
             if fish_copy.id == "sting_puffer":
@@ -1021,23 +1032,6 @@ class GameCommands:
                 lines.extend(level_lines)
             return "\n".join(lines), extra_broadcast
 
-        def lose_fish(reason: str):
-            degrade_msgs = player.degrade_fishing_gear()
-            if reason == "timeout":
-                lines = [
-                    "You react too slowly and lose the tension — the fish gets away!"
-                ]
-            else:
-                lines = [
-                    "You pull the wrong way and lose the tension — the fish gets away!"
-                ]
-            if degrade_msgs:
-                lines.extend(degrade_msgs)
-            return (
-                "\n".join(lines),
-                f"ROOM:{room.id}:{player.name}'s hooked fish gets away!",
-            )
-
         return CommandResult(
             message="",
             immediate_message=cast_message,
@@ -1051,7 +1045,8 @@ class GameCommands:
             reel_challenge=ReelChallenge(
                 total_seconds=reel_seconds,
                 response_seconds=response_seconds,
-                failure=lose_fish,
+                intelligence=intelligence,
+                wisdom=wisdom,
             ),
             deferred=finish_catch,
             broadcast=(
@@ -1154,6 +1149,59 @@ class GameCommands:
         return CommandResult(
             self._population_message(population),
             broadcast=broadcast,
+        )
+
+    @staticmethod
+    def _appraisal_range(value: int, score: int, *, total: bool) -> tuple[int, int]:
+        """Return an INT/WIS-scaled estimate around a true sale value."""
+        floor = 0.20 if total else 0.10
+        base = 0.85 if total else 0.60
+        uncertainty = max(floor, base - 0.04 * score)
+        low = max(1, math.floor(value * (1.0 - uncertainty)))
+        high = max(low, math.ceil(value * (1.0 + uncertainty)))
+        return low, high
+
+    def cmd_appraise(self, player: Player, args: str) -> CommandResult:
+        """Estimate one fish or all carried fish at Bubba's current prices."""
+        intelligence = player.get_effective_attribute("intelligence")
+        wisdom = player.get_effective_attribute("wisdom")
+        if intelligence + wisdom < 4:
+            return CommandResult(
+                "You attempt to appraise the value of your fish, "
+                "but it could be any number..."
+            )
+
+        score = intelligence + 2 * wisdom
+        query = args.strip()
+        if query:
+            item = player.find_item(query)
+            if not item:
+                return CommandResult(f"You don't have a '{query}'.")
+            if item.item_type != ItemType.FISH:
+                return CommandResult(
+                    f"Your {item.display_name} is not a fish to appraise."
+                )
+            value = self._estimate_sell_price(StoreType.BUBBA, item, player)
+            if value is None:
+                return CommandResult("You cannot get a useful appraisal for that fish.")
+            low, high = self._appraisal_range(value, score, total=False)
+            return CommandResult(
+                f"You estimate Bubba would pay about ${low} - ${high} "
+                f"for your {item.display_name}."
+            )
+
+        fish = [item for item in player.inventory if item.item_type == ItemType.FISH]
+        if not fish:
+            return CommandResult("You have no fish to appraise.")
+        values = [
+            self._estimate_sell_price(StoreType.BUBBA, item, player)
+            for item in fish
+        ]
+        total_value = sum(value for value in values if value is not None)
+        low, high = self._appraisal_range(total_value, score, total=True)
+        return CommandResult(
+            f"You estimate Bubba would pay about ${low} - ${high} "
+            f"for all {len(fish)} fish."
         )
 
     def _population_message(self, population: int) -> str:
@@ -1419,7 +1467,7 @@ ITEMS:
   drop <item>          - Drop an item
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
   examine/ex <item/#>  - Look closely at something (or inventory #)
-  equip/eq/wear/don <item> - Equip or wear an item
+  equip/eq/wear/don [item] - Show equipment, or equip/wear an item
   wear all              - Wear clothing into empty slots
   unequip/uneq/remove/rem [item] - Remove gear (bare removes all worn)
   remove <attr>         - Remove all gear boosting that attribute (e.g. rem con)
@@ -1429,6 +1477,7 @@ ITEMS:
 FISHING:
   fish/cast           - Cast your line (need pole equipped!)
   consider/con        - Estimate a fishing spot's population
+  appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
   weather             - Check current weather conditions
 
 SHOPPING (at Bubba's or Slick's):
@@ -1791,7 +1840,7 @@ TIPS:
         if store_type == StoreType.BUBBA and item.item_type != ItemType.FISH:
             return None
         if store_type == StoreType.SLICK:
-            base = max(1, int(item.value * 0.4))
+            base = max(1, int(item.value * 0.2))
         else:
             base = max(1, int(item.value * 0.5))
         price = apply_condition_sell_price(base, item.condition)

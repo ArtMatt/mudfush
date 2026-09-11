@@ -375,9 +375,21 @@ class Market:
             if price_info and price_info.base_price > 0:
                 size_multiplier = item.value / price_info.base_price
                 sell_price = max(1, round(sell_price * size_multiplier))
+        elif store == StoreType.SLICK:
+            # Slick's immediate buyback offer is deliberately much lower than
+            # his shelf price. Market movement can still create a later profit.
+            sell_price = max(1, round(sell_price * 0.5))
 
         sell_price = apply_condition_sell_price(sell_price, item.condition)
-        return apply_charisma_sell_bonus(store, item, sell_price, charisma)
+        offer = apply_charisma_sell_bonus(store, item, sell_price, charisma)
+        if store == StoreType.SLICK and item.item_type != ItemType.FISH:
+            current_buy = self.get_buy_price(store, item.id)
+            if current_buy is not None and current_buy > 0:
+                # Even one-gold goods cannot be bought and immediately sold
+                # back without a loss. A future higher market can still beat
+                # the price the player originally paid.
+                offer = min(offer, max(0, current_buy - 1))
+        return offer
 
     def _market_insight(self, store: StoreType, wisdom: int) -> List[str]:
         """Wisdom-gated market flavor text."""

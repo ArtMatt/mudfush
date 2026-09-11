@@ -93,7 +93,7 @@ class Room:
             lines.append("\nExits: [none]")
         
         if self.is_water:
-            lines.append("\n(You can FISH here)")
+            lines.append("\n(You can \033[96mFISH\033[0m here)")
         
         return "\n".join(lines)
 

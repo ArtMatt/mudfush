@@ -27,6 +27,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+monotonic = time.monotonic
 
 
 class FishingMUD:
@@ -1017,21 +1018,12 @@ class MUDSession:
                                     stage.broadcast, self.player.name
                                 )
 
-                        reel_succeeded = True
                         if result.reel_challenge:
-                            reel_succeeded, failure_reason = (
-                                await self._run_reel_challenge(
-                                    result.reel_challenge
-                                )
+                            await self._run_reel_challenge(
+                                result.reel_challenge
                             )
-                            if not reel_succeeded:
-                                failure_out = result.reel_challenge.failure(
-                                    failure_reason
-                                )
-                                result.message = failure_out[0] or ""
-                                result.broadcast = failure_out[1]
 
-                        if result.deferred and reel_succeeded:
+                        if result.deferred:
                             deferred_out = result.deferred()
                             if isinstance(deferred_out, tuple):
                                 result.message = deferred_out[0] or ""
@@ -1092,76 +1084,133 @@ class MUDSession:
         finally:
             await self.cleanup()
 
-    async def _run_reel_challenge(self, challenge) -> tuple[bool, str]:
+    async def _run_reel_challenge(self, challenge) -> None:
         """
-        Run reel time with progress notices and 40-second direction checks.
-        After each full 40s chunk, require the opposite direction within
-        Dexterity + 2 seconds.
-        """
-        total = float(challenge.total_seconds)
-        response_seconds = max(2, int(challenge.response_seconds))
-        elapsed = 0.0
+        Run a dynamic reel timer.
 
-        progress_messages = [
-            (0.2, "You still have a lot of line to reel in"),
-            (0.4, "You are almost halfway done"),
-            (0.6, "You are more than halfway done"),
-            (0.8, "You almost have the fish!"),
+        Direction mistakes add 25% of the original duration. Helpful mental
+        events can remove 15 seconds, and time spent answering those events
+        continues to count down the reel.
+        """
+        original = float(challenge.total_seconds)
+        remaining = original
+        response_seconds = max(2, int(challenge.response_seconds))
+        direction_in = 40.0
+        helpful_in = 20.0
+        mental_score = 2 * challenge.intelligence + challenge.wisdom
+        helpful_chance = min(75, max(0, 5 * (mental_score - 3)))
+        helpful_actions = ("reel", "pull", "slack", "yank")
+
+        progress = [
+            [original * 0.8, "You still have a lot of line to reel in", False],
+            [original * 0.6, "You are almost halfway done", False],
+            [original * 0.4, "You are more than halfway done", False],
+            [original * 0.2, "You almost have the fish!", False],
         ]
 
-        # (time, kind, payload) — progress notices and direction challenges
-        events = []
-        for fraction, message in progress_messages:
-            at = total * fraction
-            if 0 < at < total:
-                events.append((at, "progress", message))
+        def show_progress() -> list[str]:
+            messages = []
+            for entry in progress:
+                threshold, message, shown = entry
+                if not shown and remaining <= threshold:
+                    messages.append(message)
+                    entry[2] = True
+            return messages
 
-        challenge_at = 40.0
-        while challenge_at <= total:
-            events.append((challenge_at, "challenge", None))
-            challenge_at += 40.0
+        async def pass_reel_time(seconds: float) -> None:
+            """Count down normal reel time and both recurring event clocks."""
+            nonlocal remaining, direction_in, helpful_in
+            if seconds <= 0:
+                return
+            await asyncio.sleep(seconds)
+            remaining = max(0.0, remaining - seconds)
+            direction_in -= seconds
+            helpful_in -= seconds
 
-        events.sort(key=lambda item: (item[0], 0 if item[1] == "progress" else 1))
-
-        for event_time, kind, payload in events:
-            wait = event_time - elapsed
-            if wait > 0:
-                await asyncio.sleep(wait)
-                elapsed = event_time
-
-            if kind == "progress":
-                await self.send_message(f"\n{payload}\n")
-                continue
-
-            pulling = random.choice(("left", "right"))
-            correct = "right" if pulling == "left" else "left"
-            await self.send_message(
-                f"\nThe fish is pulling to the {pulling}, pull the other way!\n"
+        while remaining > 0:
+            next_progress = min(
+                (
+                    remaining - threshold
+                    for threshold, _, shown in progress
+                    if not shown and remaining > threshold
+                ),
+                default=remaining,
             )
-            try:
-                response = await asyncio.wait_for(
-                    self.get_input(
-                        f"(You have {response_seconds} seconds) > "
-                    ),
-                    timeout=response_seconds,
+            wait = min(remaining, direction_in, helpful_in, next_progress)
+            await pass_reel_time(max(0.0, wait))
+
+            for message in show_progress():
+                await self.send_message(f"\n{message}\n")
+
+            # Direction checks pause the reel while the player answers.
+            if direction_in <= 0:
+                direction_in += 40.0
+                pulling = random.choice(("left", "right"))
+                correct = "right" if pulling == "left" else "left"
+                await self.send_message(
+                    f"\nThe fish is pulling to the {pulling}, "
+                    "pull the other way!\n"
                 )
-            except asyncio.TimeoutError:
-                await self.send_message("\nToo slow!\n")
-                return False, "timeout"
+                try:
+                    response = await asyncio.wait_for(
+                        self.get_input(
+                            f"(You have {response_seconds} seconds) > "
+                        ),
+                        timeout=response_seconds,
+                    )
+                    succeeded = response.strip().lower() in {correct, correct[0]}
+                except asyncio.TimeoutError:
+                    succeeded = False
 
-            answer = response.strip().lower()
-            valid = {correct, correct[0]}
-            if answer not in valid:
-                return False, "wrong"
+                if succeeded:
+                    await self.send_message(
+                        f"You pull {correct} and keep the line tight!\n"
+                    )
+                else:
+                    penalty = original * 0.25
+                    remaining += penalty
+                    await self.send_message(
+                        f"The fish takes more line! About {penalty:g} seconds "
+                        "have been added to the reel.\n"
+                    )
 
-            await self.send_message(
-                f"You pull {correct} and keep the line tight!\n"
-            )
+            # Helpful opportunities occur midway between direction checks.
+            if helpful_in <= 0 and remaining > 0:
+                helpful_in += 40.0
+                if random.randint(1, 100) <= helpful_chance:
+                    action = random.choice(helpful_actions)
+                    window = min(5.0, remaining)
+                    await self.send_message(
+                        f"\nYou see an opening! Type {action.upper()} now!\n"
+                    )
+                    started = monotonic()
+                    answer = ""
+                    try:
+                        answer = await asyncio.wait_for(
+                            self.get_input("(You have 5 seconds) > "),
+                            timeout=window,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    elapsed = min(window, monotonic() - started)
+                    remaining = max(0.0, remaining - elapsed)
+                    direction_in -= elapsed
+                    helpful_in -= elapsed
 
-        if elapsed < total:
-            await asyncio.sleep(total - elapsed)
+                    if answer.strip().lower() == action:
+                        saved = min(15.0, remaining)
+                        remaining -= saved
+                        await self.send_message(
+                            f"Perfect {action}! You bring the fish in "
+                            f"{saved:g} seconds faster.\n"
+                        )
+                    elif remaining > 0:
+                        await self.send_message(
+                            "The opening passes, but you keep reeling.\n"
+                        )
 
-        return True, ""
+                    for message in show_progress():
+                        await self.send_message(f"\n{message}\n")
 
     def _cancel_slick_deal_task(self):
         """Cancel any pending Slick worm-deal timer."""
