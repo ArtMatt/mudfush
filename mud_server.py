@@ -20,6 +20,7 @@ from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
 from weather import WeatherSystem, WeatherType, WEATHER_DATA
 from market import Market
+from lake_state import LakeCycleState
 
 # Configure logging
 logging.basicConfig(
@@ -38,11 +39,13 @@ class FishingMUD:
         self.player_manager = PlayerManager()
         self.weather = WeatherSystem()
         self.market = Market()
+        self.lake_state = LakeCycleState()
         self.commands = GameCommands(
             self.rooms, 
             self.player_manager,
             weather=self.weather,
-            market=self.market
+            market=self.market,
+            lake_state=self.lake_state,
         )
         self.sessions: Dict[str, 'MUDSession'] = {}  # player_name -> session
         self._autosave_task = None
@@ -598,6 +601,7 @@ Admin console commands:
         return await self._apply_player_reset(offline, online=False)
 
     async def _apply_player_reset(self, source: Player, online: bool) -> str:
+        self.commands.release_ancient_whiskers(source)
         fresh = self.player_manager.create_reset_player(source)
 
         if online:
@@ -655,6 +659,7 @@ Admin console commands:
 
         display = canonical or name
         if online:
+            self.commands.release_ancient_whiskers(online)
             session = self.sessions.get(online.name)
             room = self.rooms.get(online.current_room)
             if room:
@@ -1096,9 +1101,9 @@ class MUDSession:
         remaining = original
         response_seconds = max(2, int(challenge.response_seconds))
         direction_in = 40.0
-        helpful_in = 20.0
+        helpful_in = 5.0
         mental_score = 2 * challenge.intelligence + challenge.wisdom
-        helpful_chance = min(75, max(0, 5 * (mental_score - 3)))
+        helpful_chance = min(75.0, max(0.0, 2.5 * (mental_score - 3)))
         helpful_actions = ("reel", "pull", "slack", "yank")
 
         progress = [
@@ -1170,14 +1175,13 @@ class MUDSession:
                     penalty = original * 0.25
                     remaining += penalty
                     await self.send_message(
-                        f"The fish takes more line! About {penalty:g} seconds "
-                        "have been added to the reel.\n"
+                        "The fish takes more line! You have more to reel in.\n"
                     )
 
-            # Helpful opportunities occur midway between direction checks.
+            # Helpful opportunities are rolled every 5 seconds of reel time.
             if helpful_in <= 0 and remaining > 0:
-                helpful_in += 40.0
-                if random.randint(1, 100) <= helpful_chance:
+                helpful_in += 5.0
+                if random.random() * 100.0 < helpful_chance:
                     action = random.choice(helpful_actions)
                     window = min(5.0, remaining)
                     await self.send_message(
@@ -1201,8 +1205,7 @@ class MUDSession:
                         saved = min(15.0, remaining)
                         remaining -= saved
                         await self.send_message(
-                            f"Perfect {action}! You bring the fish in "
-                            f"{saved:g} seconds faster.\n"
+                            f"Perfect {action}! You bring the fish in faster.\n"
                         )
                     elif remaining > 0:
                         await self.send_message(
@@ -1278,6 +1281,7 @@ class MUDSession:
         if self.player:
             player_name = self.player.name
             self.player.clear_slick_visit()
+            self.game.commands.release_ancient_whiskers(self.player)
             
             # Remove from room
             room = self.game.rooms.get(self.player.current_room)

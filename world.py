@@ -165,7 +165,8 @@ Type 'buy <item>' to purchase fishing gear, or 'list' to see what's for sale."""
         description="""You're standing on the wooden porch of Bubba's Bait & Tackle. 
 A creaky rocking chair sits empty beside the door. The smell of 
 earthworms and fish bait drifts out from inside. A dirt path leads 
-south toward the lake, and you can see the glimmer of water in the distance.""",
+south toward the lake, and you can see the glimmer of water in the distance.
+A large stream rushes past the store and winds downhill toward the lake.""",
         exits={"north": "store", "south": "trail_north"},
         items=[],
         is_water=False

@@ -98,6 +98,8 @@ class Player:
     # Runtime-only beer drink confirmation (not saved)
     beer_awaiting_attr: bool = False
     beer_confirm_attr: Optional[str] = None
+    # Reserved during the reel, before Ancient Whiskers reaches inventory
+    ancient_whiskers_reserved: bool = False
     # Wearables worn since the last timed clothing-degrade tick
     clothes_worn_since_degrade: Set[int] = field(default_factory=set)
 
@@ -254,7 +256,13 @@ class Player:
             "password_hash": self.password_hash,
             "password_salt": self.password_salt,
             "current_room": self.current_room,
-            "inventory": [item_to_dict(item) for item in self.inventory],
+            # Ancient Whiskers returns to the lake on logout/restart and is
+            # therefore never persisted in a character save.
+            "inventory": [
+                item_to_dict(item)
+                for item in self.inventory
+                if item.id != "ancient_whiskers"
+            ],
             "gold": self.gold,
             "equipped_pole_idx": equipped_pole_idx,
             "equipped_lure_idx": equipped_lure_idx,

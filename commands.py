@@ -19,6 +19,7 @@ from items import (
     UNSELLABLE_TYPES, GEMMABLE_TYPES,
 )
 from market import Market, StoreType, apply_condition_sell_price, apply_charisma_sell_bonus
+from lake_state import LakeCycleState
 
 if TYPE_CHECKING:
     from weather import WeatherSystem
@@ -102,11 +103,14 @@ class GameCommands:
     """Handles all game commands."""
     
     def __init__(self, rooms: Dict[str, Room], player_manager: PlayerManager,
-                 weather: Optional['WeatherSystem'] = None, market: Optional[Market] = None):
+                 weather: Optional['WeatherSystem'] = None,
+                 market: Optional[Market] = None,
+                 lake_state: Optional[LakeCycleState] = None):
         self.rooms = rooms
         self.player_manager = player_manager
         self.weather = weather
         self.market = market
+        self.lake_state = lake_state
         
         # Command mapping
         self.commands: Dict[str, Callable] = {
@@ -495,6 +499,19 @@ class GameCommands:
             return CommandResult(f"You're not carrying a '{item_name}'.")
         
         room = self.rooms.get(player.current_room)
+        if item.id == "ancient_whiskers":
+            player.remove_item(item)
+            if self.lake_state:
+                self.lake_state.release()
+            message = (
+                "The Ancient Whiskers slaps its tail wildly and flips itself "
+                "toward the water. It's GONE!!"
+            )
+            return CommandResult(
+                message=message,
+                broadcast=f"ROOM:{room.id}:{message}",
+            )
+
         player.remove_item(item)
         room.items.append(item)
         
@@ -506,6 +523,20 @@ class GameCommands:
     def cmd_inventory(self, player: Player, args: str) -> CommandResult:
         """Show player inventory, optionally filtered (e.g. inv hat)."""
         return CommandResult(player.get_inventory_display(args))
+
+    def release_ancient_whiskers(self, player: Player) -> bool:
+        """Return a held or in-flight Ancient Whiskers to the catch pool."""
+        held = [
+            item for item in player.inventory
+            if item.id == "ancient_whiskers"
+        ]
+        reserved = player.ancient_whiskers_reserved
+        for item in held:
+            player.remove_item(item)
+        player.ancient_whiskers_reserved = False
+        if (held or reserved) and self.lake_state:
+            self.lake_state.release()
+        return bool(held or reserved)
     
     def cmd_examine(self, player: Player, target: str) -> CommandResult:
         """Examine an item or object."""
@@ -958,7 +989,9 @@ class GameCommands:
                 stages=[DelayStage(bite_seconds, miss)],
             )
 
-        caught_fish = self._select_fish(fishing_power, rare_modifier)
+        caught_fish = self._select_fish(
+            fishing_power, rare_modifier, player=player
+        )
         fish_copy = self._create_sized_fish(caught_fish)
         weight_hint = self._fish_weight_hint(fish_copy.weight)
 
@@ -990,6 +1023,8 @@ class GameCommands:
                 "\n" + "\n".join(degrade_msgs) if degrade_msgs else ""
             )
             player.add_item(fish_copy)
+            if fish_copy.id == "ancient_whiskers":
+                player.ancient_whiskers_reserved = False
             level_lines = player.record_fish_catch(fish_copy.weight)
             level_progress = (
                 f"[{player.total_weight_caught:.1f}/"
@@ -1080,7 +1115,12 @@ class GameCommands:
             )
         return template.format(d=colorize_condition(quality, word))
     
-    def _select_fish(self, fishing_power: int, rare_modifier: float) -> Item:
+    def _select_fish(
+        self,
+        fishing_power: int,
+        rare_modifier: float,
+        player: Optional[Player] = None,
+    ) -> Item:
         """Select a fish species using rarity, gear, and weather."""
         adjusted_weights = []
         for fish, weight in CATCHABLE_FISH:
@@ -1095,11 +1135,29 @@ class GameCommands:
         for fish, weight in adjusted_weights:
             cumulative += weight
             if roll <= cumulative:
+                if (
+                    fish.id == "legendary_carp"
+                    and self.lake_state
+                    and self.lake_state.available
+                    and random.randint(1, 100) == 1
+                    and self.lake_state.reserve()
+                ):
+                    if player:
+                        player.ancient_whiskers_reserved = True
+                    return self.lake_state.create_catch()
                 return fish
         return CATCHABLE_FISH[0][0]
 
     def _create_sized_fish(self, fish: Item) -> Item:
         """Create a fish whose rarer size changes its weight and value."""
+        if fish.id == "ancient_whiskers":
+            caught = create_item_copy(fish)
+            caught.fish_size = None
+            caught.weight = fish.weight
+            caught.value = fish.value
+            caught.description = fish.description
+            return caught
+
         size, weight_multiplier, value_multiplier = random.choices(
             [
                 ("tiny", 0.55, 0.5),
@@ -1723,6 +1781,38 @@ TIPS:
         if player.is_wearing_or_equipped(item):
             return CommandResult(self._refuse_equipped_sale(store_type, item))
 
+        if item.id == "ancient_whiskers":
+            if store_type == StoreType.SLICK:
+                return CommandResult(
+                    'Slick recoils. "Get that out of here, I have a bad '
+                    'feeling about that fish..."'
+                )
+
+            payout = (
+                self.lake_state.payout(item.weight)
+                if self.lake_state else item.value
+            )
+            player.remove_item(item)
+            player.gold += payout
+            player.total_gold_earned += payout
+            if self.lake_state:
+                self.lake_state.release(grow=True)
+            release_message = (
+                "Bubba quickly weighs the fish and tosses it out of the "
+                "window! It lands in the nearby stream and disappears "
+                "downstream as it makes its way back to the water."
+            )
+            return CommandResult(
+                message=(
+                    '"You\'ve caught the legend. I\'ll pay you well so we can '
+                    'return him to the water."\n'
+                    f"Bubba pays you {payout} gold.\n"
+                    f"{release_message}\n"
+                    f"You now have {player.gold} gold."
+                ),
+                broadcast=f"ROOM:{room.id}:{release_message}",
+            )
+
         if item.item_type in UNSELLABLE_TYPES:
             if store_type == StoreType.SLICK:
                 return CommandResult(
@@ -1827,6 +1917,13 @@ TIPS:
         """Estimate sell value for an inventory item at a store."""
         if item.item_type in UNSELLABLE_TYPES:
             return None
+        if item.id == "ancient_whiskers":
+            if store_type == StoreType.SLICK:
+                return None
+            return (
+                self.lake_state.payout(item.weight)
+                if self.lake_state else item.value
+            )
 
         charisma = 1
         if player is not None:
@@ -1870,6 +1967,8 @@ TIPS:
 
         offers = []
         for number, item in enumerate(player.get_inventory_display_order(), start=1):
+            if item.id == "ancient_whiskers":
+                continue
             price = self._estimate_sell_price(store_type, item, player)
             if price is None:
                 continue

@@ -716,6 +716,18 @@ LEGENDARY_CARP = Item(
     weight=25.0,
 )
 
+ANCIENT_WHISKERS = Item(
+    id="ancient_whiskers",
+    name="Ancient Whiskers",
+    description=(
+        "An impossibly old carp marked by deep scars and long silver whiskers. "
+        "The lake itself seems quieter around it."
+    ),
+    item_type=ItemType.FISH,
+    value=510,
+    weight=46.0,
+)
+
 # Misc items
 TACKLE_BOX = Item(
     id="tackle_box",
@@ -752,7 +764,7 @@ TOOLKIT = Item(
     ),
     item_type=ItemType.TOOLKIT,
     takeable=True,
-    value=200,
+    value=2000,
 )
 
 BEER = Item(

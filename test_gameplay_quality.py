@@ -1,14 +1,18 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
-from commands import GameCommands, ReelChallenge
+from commands import CATCHABLE_FISH, GameCommands, ReelChallenge
 from items import (
+    ANCIENT_WHISKERS,
     BASIC_POLE,
     BLUEGILL,
     ItemType,
     STORE_INVENTORY,
     create_item_copy,
 )
+from lake_state import LakeCycleState
 from market import Market, StoreType
 from mud_server import MUDSession
 from player import Player
@@ -128,7 +132,7 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
             await session._run_reel_challenge(challenge)
 
         output = "".join(call.args[0] for call in session.send_message.call_args_list)
-        self.assertIn("10 seconds have been added", output)
+        self.assertIn("You have more to reel in", output)
         self.assertAlmostEqual(
             sum(call.args[0] for call in fake_sleep.call_args_list),
             50.0,
@@ -146,22 +150,102 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
         )
 
         fake_sleep = AsyncMock()
+        rolls = iter([0.0, *[1.0] * 50])
+
+        def fake_choice(seq):
+            seq = tuple(seq)
+            if seq == ("reel", "pull", "slack", "yank"):
+                return "reel"
+            return "left"
+
         with (
             patch("mud_server.asyncio.sleep", new=fake_sleep),
-            patch("mud_server.random.randint", return_value=1),
-            patch("mud_server.random.choice", return_value="reel"),
+            patch("mud_server.random.random", side_effect=lambda: next(rolls)),
+            patch("mud_server.random.choice", side_effect=fake_choice),
             patch("mud_server.monotonic", side_effect=[100.0, 103.0]),
         ):
             await session._run_reel_challenge(challenge)
 
         output = "".join(call.args[0] for call in session.send_message.call_args_list)
-        self.assertIn("15 seconds faster", output)
-        # 32 seconds in normal sleeps + 3 seconds spent answering = 35;
-        # the other 15 seconds were removed by the successful event.
+        self.assertIn("You bring the fish in faster", output)
         self.assertAlmostEqual(
             sum(call.args[0] for call in fake_sleep.call_args_list),
             32.0,
         )
+
+
+class AncientWhiskersTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        path = Path(self.temp_dir.name) / ".water_cycle.json"
+        self.state = LakeCycleState(path)
+        self.rooms = create_world()
+        self.commands = GameCommands(
+            self.rooms,
+            Mock(),
+            weather=None,
+            market=Market(),
+            lake_state=self.state,
+        )
+
+    def test_second_roll_reserves_only_one_fixed_size_catch(self):
+        total = sum(weight for _, weight in CATCHABLE_FISH)
+        player = Player("angler")
+        with patch("commands.random.randint", side_effect=[total, 1, 9, total]):
+            ancient = self.commands._select_fish(0, 1.0, player)
+            ordinary = self.commands._select_fish(0, 1.0, Player("other"))
+
+        self.assertEqual(ancient.id, "ancient_whiskers")
+        self.assertEqual(ancient.weight, 46.0)
+        self.assertTrue(player.ancient_whiskers_reserved)
+        self.assertFalse(self.state.available)
+        self.assertEqual(ordinary.id, "legendary_carp")
+
+        sized = self.commands._create_sized_fish(ancient)
+        self.assertEqual(sized.weight, 46.0)
+        self.assertIsNone(sized.fish_size)
+
+    def test_drop_returns_without_growth_and_logout_is_not_saved(self):
+        player = Player("angler", current_room="store_porch")
+        ancient = self.state.create_catch()
+        player.add_item(ancient)
+        self.state.reserve()
+
+        result = self.commands.cmd_drop(player, "ancient")
+        self.assertIn("It's GONE!!", result.message)
+        self.assertTrue(self.state.available)
+        self.assertEqual(self.state.weight, 46.0)
+        self.assertNotIn(ancient, self.rooms["store_porch"].items)
+
+        player.add_item(ancient)
+        self.assertFalse(any(
+            item["id"] == "ancient_whiskers"
+            for item in player.to_dict()["inventory"]
+        ))
+
+    def test_slick_refuses_and_bubba_pays_then_grows(self):
+        player = Player("angler", current_room="slick_store")
+        ancient = self.state.create_catch()
+        player.add_item(ancient)
+        self.state.reserve()
+
+        slick = self.commands.cmd_sell(player, "ancient")
+        self.assertIn("Get that out of here", slick.message)
+        self.assertIn(ancient, player.inventory)
+        self.assertNotIn(
+            "Ancient Whiskers",
+            self.commands._format_sell_offer_list(player, StoreType.SLICK),
+        )
+
+        player.current_room = "store"
+        bubba = self.commands.cmd_sell(player, "ancient")
+        self.assertIn("Bubba pays you 510 gold", bubba.message)
+        self.assertIn("tosses it out of the window", bubba.message)
+        self.assertEqual(player.gold, 560)
+        self.assertEqual(self.state.weight, 47.0)
+        self.assertTrue(self.state.available)
+        self.assertNotIn(ancient, player.inventory)
 
 
 if __name__ == "__main__":
