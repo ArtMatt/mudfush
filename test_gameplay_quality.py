@@ -114,6 +114,21 @@ class GameplayQualityTests(unittest.TestCase):
 
         self.assertIn("(0.4 lbs) [614.9/800]", message)
 
+    def test_bare_sell_greens_percent_hints_at_wisdom_12(self):
+        player = Player("angler", current_room="store")
+        player.attributes["wisdom"] = 8
+        player.attributes["charisma"] = 5
+        fish = create_item_copy(BLUEGILL, roll_stats=False, condition=9)
+        player.add_item(fish)
+
+        mid = self.commands._format_sell_offer_list(player, StoreType.BUBBA)
+        self.assertRegex(mid, r"\(\+\d+% vs usual\)")
+        self.assertNotIn("\033[32m", mid)
+
+        player.attributes["wisdom"] = 12
+        high = self.commands._format_sell_offer_list(player, StoreType.BUBBA)
+        self.assertRegex(high, r"\033\[32m\(\+\d+% vs usual\)\033\[0m")
+
 
 class ReelEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_direction_adds_quarter_of_original_time(self):

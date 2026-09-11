@@ -2008,7 +2008,10 @@ TIPS:
                         # Compare paid amount to usual species sell price
                         pct = round(((price - usual) / usual) * 100)
                         if pct != 0:
-                            line += f" ({pct:+d}% vs usual)"
+                            hint = f"({pct:+d}% vs usual)"
+                            if wisdom >= 12:
+                                hint = f"\033[32m{hint}\033[0m"
+                            line += f" {hint}"
             lines.append(line)
 
         if wisdom <= 2:
