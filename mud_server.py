@@ -21,6 +21,7 @@ from commands import GameCommands, CommandResult
 from weather import WeatherSystem, WeatherType
 from market import Market
 from lake_state import LakeCycleState
+from fishermen import FISHERMAN_DISPLAY_NAME, FishermanManager
 
 # Configure logging
 logging.basicConfig(
@@ -40,12 +41,14 @@ class FishingMUD:
         self.weather = WeatherSystem()
         self.market = Market()
         self.lake_state = LakeCycleState()
+        self.fishermen = FishermanManager(self.rooms)
         self.commands = GameCommands(
             self.rooms, 
             self.player_manager,
             weather=self.weather,
             market=self.market,
             lake_state=self.lake_state,
+            fishermen=self.fishermen,
         )
         self.sessions: Dict[str, 'MUDSession'] = {}  # player_name -> session
         self._autosave_task = None
@@ -86,8 +89,24 @@ class FishingMUD:
     async def start_market(self, interval: int = 600):
         """Start the market system (updates every 10 minutes)."""
         self.market.set_broadcast_callback(self.broadcast_global)
+        self.market.set_restock_callback(self.relocate_fishermen)
         await self.market.start(interval)
         logger.info(f"Market system started (updates every {interval//60} minutes)")
+
+    async def relocate_fishermen(self) -> None:
+        """Move every hidden fisherman on Bubba's clothing restock."""
+        moves = self.fishermen.relocate()
+        for _, old_room, _ in moves:
+            await self.broadcast_to_room(
+                old_room,
+                f"{FISHERMAN_DISPLAY_NAME} packs up their tackle and walks away.",
+            )
+        for _, _, new_room in moves:
+            await self.broadcast_to_room(
+                new_room,
+                f"{FISHERMAN_DISPLAY_NAME} arrives, sets down their tackle, and casts.",
+            )
+        logger.info("Relocated all fishing NPCs after Bubba restock")
 
     async def start_population_updates(self, interval: int = 120):
         """Update fish populations and weather together."""
@@ -503,6 +522,8 @@ Admin console commands:
 
         self.rooms = create_world()
         self.commands.rooms = self.rooms
+        self.fishermen = FishermanManager(self.rooms)
+        self.commands.fishermen = self.fishermen
 
         moved = []
         for player, room_id in placements:
@@ -556,6 +577,7 @@ Admin console commands:
             "*Market prices and clothing stock have been reset.*\n"
             f'*Bubba hollers, "{quest.offer_phrase()}!"*'
         )
+        await self.relocate_fishermen()
         logger.info("Admin reset market")
         return (
             f"Market prices and clothing stock reset. "

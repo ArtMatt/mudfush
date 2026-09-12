@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
 from commands import CATCHABLE_FISH, GameCommands, ReelChallenge
+from fishermen import FISHERMAN_DISPLAY_NAME, FISHERMEN, FishermanManager
 from items import (
     ANCIENT_WHISKERS,
     BASIC_POLE,
@@ -14,8 +15,8 @@ from items import (
 )
 from lake_state import LakeCycleState
 from market import Market, StoreType
-from mud_server import MUDSession
-from player import Player
+from mud_server import FishingMUD, MUDSession
+from player import Player, PlayerManager
 from weather import FORECAST_DEPTH, WeatherSystem
 from world import create_world
 
@@ -310,6 +311,127 @@ class WeatherForecastTests(unittest.TestCase):
             [line.strip() for line in after_five.strip().splitlines()],
             names,
         )
+
+
+class FishermanTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.rooms = create_world()
+        self.state = LakeCycleState(
+            Path(self.temp_dir.name) / ".water_cycle.json"
+        )
+        self.fishermen = FishermanManager(self.rooms)
+        self.commands = GameCommands(
+            self.rooms,
+            PlayerManager(),
+            weather=None,
+            market=Market(),
+            lake_state=self.state,
+            fishermen=self.fishermen,
+        )
+        for room in self.rooms.values():
+            if room.is_water:
+                room.population = 20
+        self.rooms["old_pier"].population = 90
+
+    def _player_with_local_fisherman(
+        self, name: str, charisma: int
+    ) -> tuple[Player, object]:
+        room_id = self.fishermen.assignments[FISHERMEN[0].name]
+        player = Player(name, current_room=room_id)
+        player.attributes["charisma"] = charisma
+        return player, self.fishermen.in_room(room_id)
+
+    def test_each_spot_shows_one_generic_but_unique_fisherman(self):
+        identities = []
+        for room in self.rooms.values():
+            if not room.is_water:
+                continue
+            self.assertEqual(room.npcs.count(FISHERMAN_DISPLAY_NAME), 1)
+            self.assertFalse(any(npc.name in room.npcs for npc in FISHERMEN))
+            identities.append(self.fishermen.in_room(room.id).name)
+        self.assertCountEqual(identities, [npc.name for npc in FISHERMEN])
+
+    def test_charisma_six_nod_reveals_hidden_name(self):
+        player, local = self._player_with_local_fisherman("charmer", 6)
+        result = self.commands.cmd_nod(player, "fisherman")
+        self.assertIn(local.name, result.message)
+
+    def test_say_hint_scales_and_ties_count_as_best(self):
+        low, local = self._player_with_local_fisherman("low", 1)
+        low_result = self.commands.cmd_say(low, local.name)
+        if low.current_room == "old_pier":
+            self.assertIn(local.staying, low_result.message)
+        else:
+            self.assertIn(local.elsewhere, low_result.message)
+
+        high, high_local = self._player_with_local_fisherman("high", 12)
+        high_result = self.commands.cmd_say(high, high_local.name)
+        self.assertIn("Old Wooden Pier", high_result.message)
+        self.assertIn("exceptional", high_result.message)
+
+        tied, tied_local = self._player_with_local_fisherman("tied", 1)
+        self.rooms[tied.current_room].population = 90
+        tied_result = self.commands.cmd_say(tied, tied_local.name)
+        self.assertIn(tied_local.staying, tied_result.message)
+
+    def test_wrong_name_starts_shared_nod_and_say_cooldown(self):
+        player, local = self._player_with_local_fisherman("spammer", 12)
+        wrong = next(npc for npc in FISHERMEN if npc != local)
+
+        first = self.commands.cmd_say(player, wrong.name)
+        self.assertIn(local.wrong_name, first.message)
+        second = self.commands.cmd_nod(player, "fisherman")
+        self.assertIn("ignores you", second.message)
+        third = self.commands.cmd_say(player, local.name)
+        self.assertNotIn(f"{FISHERMAN_DISPLAY_NAME} says", third.message)
+        self.assertNotIn("ignores you", third.message)
+
+    def test_giving_ancient_whiskers_returns_it_without_growth(self):
+        player, _ = self._player_with_local_fisherman("holder", 1)
+        ancient = self.state.create_catch()
+        player.add_item(ancient)
+        self.state.reserve()
+
+        result = self.commands.cmd_give(player, "ancient to tall fisherman")
+        self.assertIn("back into the lake", result.message)
+        self.assertNotIn(ancient, player.inventory)
+        self.assertTrue(self.state.available)
+        self.assertEqual(self.state.weight, 46.0)
+
+    def test_relocation_moves_every_identity_to_a_different_spot(self):
+        before = dict(self.fishermen.assignments)
+        moves = self.fishermen.relocate()
+        self.assertEqual(len(moves), len(FISHERMEN))
+        for npc in FISHERMEN:
+            self.assertNotEqual(
+                before[npc.name], self.fishermen.assignments[npc.name]
+            )
+        for room in self.rooms.values():
+            if room.is_water:
+                self.assertEqual(room.npcs.count(FISHERMAN_DISPLAY_NAME), 1)
+
+
+class FishermanBroadcastTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restock_relocation_broadcasts_departures_and_arrivals(self):
+        game = FishingMUD.__new__(FishingMUD)
+        rooms = create_world()
+        game.fishermen = FishermanManager(rooms)
+        game.broadcast_to_room = AsyncMock()
+
+        await game.relocate_fishermen()
+
+        self.assertEqual(
+            game.broadcast_to_room.await_count,
+            len(FISHERMEN) * 2,
+        )
+        messages = [
+            call.args[1]
+            for call in game.broadcast_to_room.await_args_list
+        ]
+        self.assertTrue(any("walks away" in message for message in messages))
+        self.assertTrue(any("arrives" in message for message in messages))
 
 
 if __name__ == "__main__":

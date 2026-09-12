@@ -128,6 +128,7 @@ class Market:
         self._task: Optional[asyncio.Task] = None
         self._clothing_task: Optional[asyncio.Task] = None
         self._broadcast_callback: Optional[Callable] = None
+        self._restock_callback: Optional[Callable] = None
         
         self._initialize_prices()
         self.rotate_clothing_stock(announce=False)
@@ -471,6 +472,10 @@ class Market:
     def set_broadcast_callback(self, callback: Callable):
         """Set callback for broadcasting market changes."""
         self._broadcast_callback = callback
+
+    def set_restock_callback(self, callback: Callable):
+        """Set an async callback run after each hourly Bubba restock."""
+        self._restock_callback = callback
     
     async def start(self, interval: int = 600):
         """Start the market update and clothing rotation loops."""
@@ -492,6 +497,8 @@ class Market:
                         f'*** Bubba hollers, "{quest.offer_phrase()}!" ***'
                     )
                     await self._broadcast_callback(msg)
+                if self._restock_callback:
+                    await self._restock_callback()
         
         self._task = asyncio.create_task(market_loop())
         self._clothing_task = asyncio.create_task(clothing_loop())

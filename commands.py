@@ -20,6 +20,7 @@ from items import (
 )
 from market import Market, StoreType, apply_condition_sell_price, apply_charisma_sell_bonus
 from lake_state import LakeCycleState
+from fishermen import FISHERMAN_DISPLAY_NAME, Fisherman, FishermanManager
 
 if TYPE_CHECKING:
     from weather import WeatherSystem
@@ -68,6 +69,13 @@ NPC_DESCRIPTIONS = {
     ),
 }
 
+FISHING_SPOT_LANDMARKS = {
+    "lake_shore": "along the sandy shore",
+    "shallow_cove": "among the reeds in the quiet cove",
+    "old_pier": "beside the old wooden boards",
+    "rocky_point": "out by the flat rocks",
+}
+
 
 @dataclass
 class DelayStage:
@@ -105,12 +113,14 @@ class GameCommands:
     def __init__(self, rooms: Dict[str, Room], player_manager: PlayerManager,
                  weather: Optional['WeatherSystem'] = None,
                  market: Optional[Market] = None,
-                 lake_state: Optional[LakeCycleState] = None):
+                 lake_state: Optional[LakeCycleState] = None,
+                 fishermen: Optional[FishermanManager] = None):
         self.rooms = rooms
         self.player_manager = player_manager
         self.weather = weather
         self.market = market
         self.lake_state = lake_state
+        self.fishermen = fishermen
         
         # Command mapping
         self.commands: Dict[str, Callable] = {
@@ -577,6 +587,16 @@ class GameCommands:
         # Check for NPCs in the room
         for npc in room.npcs:
             if target == npc.lower():
+                if (
+                    npc.lower() == FISHERMAN_DISPLAY_NAME.lower()
+                    and self.fishermen
+                ):
+                    fisherman = self.fishermen.in_room(room.id)
+                    if fisherman:
+                        return CommandResult(
+                            f"\n{FISHERMAN_DISPLAY_NAME.upper()}\n"
+                            f"{fisherman.description}"
+                        )
                 desc = NPC_DESCRIPTIONS.get(
                     npc.lower(), f"\n{npc.upper()}\nA local."
                 )
@@ -1290,9 +1310,33 @@ class GameCommands:
             return CommandResult("Say what?")
         
         room = self.rooms.get(player.current_room)
+        lines = [f'You say, "{message}"']
+        broadcasts = [f'ROOM:{room.id}:{player.name} says, "{message}"']
+
+        if self.fishermen:
+            local = self.fishermen.in_room(room.id)
+            named = self.fishermen.named_in(message)
+            if local and named:
+                state = self.fishermen.begin_interaction(player.name, local)
+                if state == "active":
+                    if named != local:
+                        reply = local.wrong_name
+                    else:
+                        reply = self._fisherman_fishing_hint(player, local)
+                    lines.append(f"{FISHERMAN_DISPLAY_NAME} says, {reply}")
+                    broadcasts.append(
+                        f"ROOM:{room.id}:{FISHERMAN_DISPLAY_NAME} says, {reply}"
+                    )
+                elif state == "ignored":
+                    reaction = (
+                        f"{FISHERMAN_DISPLAY_NAME} ignores you and watches the line."
+                    )
+                    lines.append(reaction)
+                    broadcasts.append(f"ROOM:{room.id}:{reaction}")
+
         return CommandResult(
-            message=f'You say, "{message}"',
-            broadcast=f'ROOM:{room.id}:{player.name} says, "{message}"'
+            message="\n".join(lines),
+            broadcast="|".join(broadcasts),
         )
 
     def cmd_nod(self, player: Player, target: str) -> CommandResult:
@@ -1301,11 +1345,26 @@ class GameCommands:
             return CommandResult("Nod at whom?")
 
         found = self._find_attack_target(player, target)
+        room = self.rooms.get(player.current_room)
+        local_fisherman = (
+            self.fishermen.in_room(room.id) if self.fishermen else None
+        )
+        named_fisherman = (
+            self.fishermen.target_named(target) if self.fishermen else None
+        )
+        if (
+            not found
+            and local_fisherman
+            and (
+                named_fisherman
+                or self.fishermen.is_display_target(target)
+            )
+        ):
+            found = ("npc", FISHERMAN_DISPLAY_NAME)
         if not found:
             return CommandResult(f"You don't see '{target}' here.")
 
         _, name = found
-        room = self.rooms.get(player.current_room)
         lines = [f"You nod at {name}."]
         broadcasts = [f"ROOM:{room.id}:{player.name} nods at {name}."]
 
@@ -1317,10 +1376,87 @@ class GameCommands:
             broadcasts.append(
                 f"ROOM:{room.id}:Slick furrows his brow and seems sweatier."
             )
+        elif (
+            name.lower() == FISHERMAN_DISPLAY_NAME.lower()
+            and local_fisherman
+            and self.fishermen
+        ):
+            state = self.fishermen.begin_interaction(
+                player.name, local_fisherman
+            )
+            if state == "active":
+                if named_fisherman and named_fisherman != local_fisherman:
+                    reply = local_fisherman.wrong_name
+                    lines.append(f"{FISHERMAN_DISPLAY_NAME} says, {reply}")
+                    broadcasts.append(
+                        f"ROOM:{room.id}:{FISHERMAN_DISPLAY_NAME} says, {reply}"
+                    )
+                elif player.get_effective_attribute("charisma") >= 6:
+                    reply = local_fisherman.greeting
+                    lines.append(f"{FISHERMAN_DISPLAY_NAME} says, {reply}")
+                    broadcasts.append(
+                        f"ROOM:{room.id}:{FISHERMAN_DISPLAY_NAME} says, {reply}"
+                    )
+                else:
+                    reaction = (
+                        f"{FISHERMAN_DISPLAY_NAME} gives you a guarded nod."
+                    )
+                    lines.append(reaction)
+                    broadcasts.append(f"ROOM:{room.id}:{reaction}")
+            elif state == "ignored":
+                reaction = (
+                    f"{FISHERMAN_DISPLAY_NAME} ignores you and watches the line."
+                )
+                lines.append(reaction)
+                broadcasts.append(f"ROOM:{room.id}:{reaction}")
 
         return CommandResult(
             message="\n".join(lines),
             broadcast="|".join(broadcasts),
+        )
+
+    def _fisherman_fishing_hint(
+        self, player: Player, fisherman: Fisherman
+    ) -> str:
+        """Give a charisma-scaled hint about the best current fishing water."""
+        fishing_rooms = [room for room in self.rooms.values() if room.is_water]
+        best_population = max((room.population or 0) for room in fishing_rooms)
+        best_rooms = [
+            room for room in fishing_rooms
+            if (room.population or 0) == best_population
+        ]
+        current_is_best = any(
+            room.id == player.current_room for room in best_rooms
+        )
+        charisma = player.get_effective_attribute("charisma")
+
+        if charisma < 6:
+            return fisherman.staying if current_is_best else fisherman.elsewhere
+
+        # Ties are all best. If elsewhere, consistently describe the first
+        # tied room in world order rather than changing the answer per request.
+        target = (
+            self.rooms[player.current_room] if current_is_best else best_rooms[0]
+        )
+        landmark = FISHING_SPOT_LANDMARKS.get(
+            target.id, f"near {target.name.lower()}"
+        )
+        if charisma < 9:
+            if current_is_best:
+                return fisherman.staying
+            return f'{fisherman.vague_prefix} {landmark}."'
+
+        population_hint = self._population_message(target.population or 0)
+        if charisma < 12:
+            if current_is_best:
+                return f'"{population_hint}"'
+            return (
+                f'{fisherman.vague_prefix} {landmark}. '
+                f'{population_hint}"'
+            )
+        return (
+            f'{fisherman.exact_prefix} {target.name}. '
+            f'{population_hint}"'
         )
 
     def _format_duration(self, seconds: int) -> str:
@@ -1444,14 +1580,34 @@ class GameCommands:
             return CommandResult(f"You don't see '{target_name}' here.")
 
         kind, name = found
-        if kind == "npc":
-            return CommandResult(
-                f"{name} shakes their head. They won't take your items."
-            )
-
         item = player.find_item(item_query)
         if not item:
             return CommandResult(f"You don't have a '{item_query}'.")
+
+        if kind == "npc":
+            if (
+                name.lower() == FISHERMAN_DISPLAY_NAME.lower()
+                and item.id == "ancient_whiskers"
+                and self.fishermen
+                and self.fishermen.in_room(player.current_room)
+            ):
+                player.remove_item(item)
+                if self.lake_state:
+                    self.lake_state.release()
+                return CommandResult(
+                    (
+                        f"You offer {item.display_name} to {FISHERMAN_DISPLAY_NAME}.\n"
+                        "The fisherman recognizes the old carp immediately and "
+                        "slips it gently back into the lake."
+                    ),
+                    broadcast=(
+                        f"ROOM:{player.current_room}:{FISHERMAN_DISPLAY_NAME} "
+                        f"returns {item.display_name} to the lake."
+                    ),
+                )
+            return CommandResult(
+                f"{name} shakes their head. They won't take your items."
+            )
 
         if player.is_wearing_or_equipped(item):
             return CommandResult(
