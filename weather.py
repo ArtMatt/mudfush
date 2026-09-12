@@ -6,8 +6,9 @@ Weather changes periodically and affects fishing
 import random
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Dict, List, Callable, Optional
+from typing import Deque, Dict, List, Callable, Optional
 from enum import Enum
 
 
@@ -168,34 +169,55 @@ WEATHER_TRANSITIONS: Dict[WeatherType, List[tuple[WeatherType, int]]] = {
     ],
 }
 
+FORECAST_DEPTH = 5
+
 
 class WeatherSystem:
-    """Manages weather state and transitions."""
+    """Manages weather state and a banked chain of upcoming conditions."""
     
     def __init__(self):
         self.current_weather: Weather = WEATHER_DATA[WeatherType.SUNNY]
+        self.forecast: Deque[Weather] = deque()
         self.last_change: float = time.time()
         self._task: Optional[asyncio.Task] = None
         self._broadcast_callback: Optional[Callable] = None
+        self._fill_forecast()
     
     def get_current_weather(self) -> Weather:
         """Get the current weather."""
         return self.current_weather
+
+    def peek_forecast(self, count: int) -> List[Weather]:
+        """Return the next `count` banked weather states without consuming them."""
+        if count <= 0:
+            return []
+        return list(self.forecast)[:count]
     
-    def get_weather_display(self) -> str:
-        """Get a formatted weather display."""
+    def get_weather_display(self, upcoming: int = 0) -> str:
+        """Get a formatted weather display, optionally with a mental forecast."""
         w = self.current_weather
         lines = [
             f"\nWeather: {w.name}",
             f"{w.description}",
             f"Fishing: {w.affects_message}",
         ]
+        visible = max(0, min(FORECAST_DEPTH, upcoming))
+        if visible:
+            lines.append("\nComing weather:")
+            labels = ["Next", "Then", "Then", "Then", "Then"]
+            for index, future in enumerate(self.peek_forecast(visible)):
+                lines.append(f"  {labels[index]}: {future.name}")
+        else:
+            lines.append(
+                "\n(Higher Intelligence and Wisdom let you anticipate the weather.)"
+            )
         return "\n".join(lines)
-    
-    def _select_next_weather(self) -> Weather:
+
+    def _select_next_weather(self, from_weather: Optional[Weather] = None) -> Weather:
         """Select the next weather based on transition probabilities."""
+        origin = from_weather or self.current_weather
         transitions = WEATHER_TRANSITIONS.get(
-            self.current_weather.weather_type,
+            origin.weather_type,
             [(WeatherType.SUNNY, 100)]
         )
         
@@ -209,11 +231,32 @@ class WeatherSystem:
                 return WEATHER_DATA[weather_type]
         
         return WEATHER_DATA[WeatherType.SUNNY]
+
+    def _fill_forecast(self) -> None:
+        """Keep a bank of upcoming weather states after the current one."""
+        anchor = self.forecast[-1] if self.forecast else self.current_weather
+        while len(self.forecast) < FORECAST_DEPTH:
+            nxt = self._select_next_weather(anchor)
+            self.forecast.append(nxt)
+            anchor = nxt
+
+    def reset_to(self, weather_type: WeatherType = WeatherType.SUNNY) -> tuple[Weather, Weather]:
+        """Force current weather and rebuild the forecast from that state."""
+        old_weather = self.current_weather
+        self.current_weather = WEATHER_DATA[weather_type]
+        self.forecast.clear()
+        self._fill_forecast()
+        self.last_change = time.time()
+        return old_weather, self.current_weather
     
     def change_weather(self) -> tuple[Weather, Weather]:
-        """Change to new weather. Returns (old_weather, new_weather)."""
+        """Advance to the next banked weather. Returns (old_weather, new_weather)."""
         old_weather = self.current_weather
-        self.current_weather = self._select_next_weather()
+        if self.forecast:
+            self.current_weather = self.forecast.popleft()
+        else:
+            self.current_weather = self._select_next_weather()
+        self._fill_forecast()
         self.last_change = time.time()
         return old_weather, self.current_weather
     

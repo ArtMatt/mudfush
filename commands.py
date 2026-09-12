@@ -1536,7 +1536,7 @@ FISHING:
   fish/cast           - Cast your line (need pole equipped!)
   consider/con        - Estimate a fishing spot's population
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
-  weather             - Check current weather conditions
+  weather             - Check weather (Int+Wis reveals coming patterns)
 
 SHOPPING (at Bubba's or Slick's):
   list                - See items for sale & prices
@@ -1578,10 +1578,13 @@ TIPS:
         return None
     
     def cmd_weather(self, player: Player, args: str) -> CommandResult:
-        """Check the current weather."""
+        """Check the current weather, and upcoming patterns with Int+Wis."""
         if not self.weather:
             return CommandResult("Weather system not available.")
-        return CommandResult(self.weather.get_weather_display())
+        intelligence = player.get_effective_attribute("intelligence")
+        wisdom = player.get_effective_attribute("wisdom")
+        upcoming = min(5, (intelligence + wisdom) // 4)
+        return CommandResult(self.weather.get_weather_display(upcoming))
     
     def cmd_buy(self, player: Player, item_name: str) -> CommandResult:
         """Buy an item from a store by name or list number."""

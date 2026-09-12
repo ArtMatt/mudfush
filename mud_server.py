@@ -18,7 +18,7 @@ from pathlib import Path
 from world import create_world, Room, reset_ground_items
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
-from weather import WeatherSystem, WeatherType, WEATHER_DATA
+from weather import WeatherSystem, WeatherType
 from market import Market
 from lake_state import LakeCycleState
 
@@ -564,10 +564,7 @@ Admin console commands:
 
     async def reset_weather(self) -> str:
         """Reset weather to sunny."""
-        old = self.weather.current_weather
-        self.weather.current_weather = WEATHER_DATA[WeatherType.SUNNY]
-        self.weather.last_change = time.time()
-        new = self.weather.current_weather
+        old, new = self.weather.reset_to(WeatherType.SUNNY)
         if old.weather_type != new.weather_type:
             await self.broadcast_to_fishing_rooms(
                 self.weather.get_weather_change_message(old, new)

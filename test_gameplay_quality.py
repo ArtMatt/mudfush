@@ -16,6 +16,7 @@ from lake_state import LakeCycleState
 from market import Market, StoreType
 from mud_server import MUDSession
 from player import Player
+from weather import FORECAST_DEPTH, WeatherSystem
 from world import create_world
 
 
@@ -261,6 +262,47 @@ class AncientWhiskersTests(unittest.TestCase):
         self.assertEqual(self.state.weight, 47.0)
         self.assertTrue(self.state.available)
         self.assertNotIn(ancient, player.inventory)
+
+
+class WeatherForecastTests(unittest.TestCase):
+    def setUp(self):
+        self.rooms = create_world()
+        self.weather = WeatherSystem()
+        self.commands = GameCommands(
+            self.rooms, Mock(), weather=self.weather, market=Market()
+        )
+
+    def test_forecast_is_banked_and_consumed_in_order(self):
+        self.assertEqual(len(self.weather.forecast), FORECAST_DEPTH)
+        expected = list(self.weather.peek_forecast(FORECAST_DEPTH))
+        for next_weather in expected:
+            _, new = self.weather.change_weather()
+            self.assertEqual(new, next_weather)
+            self.assertEqual(len(self.weather.forecast), FORECAST_DEPTH)
+
+    def test_weather_command_gates_forecast_by_int_wis(self):
+        player = Player("angler")
+        player.attributes["intelligence"] = 1
+        player.attributes["wisdom"] = 1
+        low = self.commands.cmd_weather(player, "")
+        self.assertNotIn("Coming weather:", low.message)
+        self.assertIn("Higher Intelligence and Wisdom", low.message)
+
+        names = [w.name for w in self.weather.peek_forecast(5)]
+        player.attributes["intelligence"] = 2
+        player.attributes["wisdom"] = 2
+        one = self.commands.cmd_weather(player, "")
+        self.assertIn("Coming weather:", one.message)
+        self.assertIn(f"Next: {names[0]}", one.message)
+        self.assertNotIn(f"Then: {names[1]}", one.message)
+
+        player.attributes["intelligence"] = 10
+        player.attributes["wisdom"] = 10
+        five = self.commands.cmd_weather(player, "")
+        self.assertIn(f"Next: {names[0]}", five.message)
+        for name in names[1:]:
+            self.assertIn(f"Then: {name}", five.message)
+        self.assertEqual(five.message.count("Then:"), 4)
 
 
 if __name__ == "__main__":
