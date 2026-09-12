@@ -285,24 +285,31 @@ class WeatherForecastTests(unittest.TestCase):
         player.attributes["intelligence"] = 1
         player.attributes["wisdom"] = 1
         low = self.commands.cmd_weather(player, "")
-        self.assertNotIn("Coming weather:", low.message)
+        self.assertNotIn("You get a sense of the upcoming weather:", low.message)
         self.assertIn("Higher Intelligence and Wisdom", low.message)
 
         names = [w.name for w in self.weather.peek_forecast(5)]
         player.attributes["intelligence"] = 2
         player.attributes["wisdom"] = 2
         one = self.commands.cmd_weather(player, "")
-        self.assertIn("Coming weather:", one.message)
-        self.assertIn(f"Next: {names[0]}", one.message)
-        self.assertNotIn(f"Then: {names[1]}", one.message)
+        self.assertIn("You get a sense of the upcoming weather:", one.message)
+        after_one = one.message.split("You get a sense of the upcoming weather:")[1]
+        self.assertEqual(after_one.strip(), names[0])
 
         player.attributes["intelligence"] = 10
         player.attributes["wisdom"] = 10
         five = self.commands.cmd_weather(player, "")
-        self.assertIn(f"Next: {names[0]}", five.message)
-        for name in names[1:]:
-            self.assertIn(f"Then: {name}", five.message)
-        self.assertEqual(five.message.count("Then:"), 4)
+        self.assertIn(
+            "You can feel the pending weather changes in your bones:",
+            five.message,
+        )
+        after_five = five.message.split(
+            "You can feel the pending weather changes in your bones:"
+        )[1]
+        self.assertEqual(
+            [line.strip() for line in after_five.strip().splitlines()],
+            names,
+        )
 
 
 if __name__ == "__main__":

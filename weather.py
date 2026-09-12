@@ -170,6 +170,13 @@ WEATHER_TRANSITIONS: Dict[WeatherType, List[tuple[WeatherType, int]]] = {
 }
 
 FORECAST_DEPTH = 5
+FORECAST_HEADERS = {
+    1: "You get a sense of the upcoming weather:",
+    2: "You can almost tell how the sky will turn:",
+    3: "The coming weather is taking shape in your mind:",
+    4: "The weather's path is clear to you:",
+    5: "You can feel the pending weather changes in your bones:",
+}
 
 
 class WeatherSystem:
@@ -203,10 +210,10 @@ class WeatherSystem:
         ]
         visible = max(0, min(FORECAST_DEPTH, upcoming))
         if visible:
-            lines.append("\nComing weather:")
-            labels = ["Next", "Then", "Then", "Then", "Then"]
-            for index, future in enumerate(self.peek_forecast(visible)):
-                lines.append(f"  {labels[index]}: {future.name}")
+            lines.append("")
+            lines.append(FORECAST_HEADERS[visible])
+            for future in self.peek_forecast(visible):
+                lines.append(future.name)
         else:
             lines.append(
                 "\n(Higher Intelligence and Wisdom let you anticipate the weather.)"
