@@ -21,7 +21,7 @@ from commands import GameCommands, CommandResult
 from weather import WeatherSystem, WeatherType
 from market import Market
 from lake_state import LakeCycleState
-from fishermen import FISHERMAN_DISPLAY_NAME, FishermanManager
+from fishermen import FishermanManager
 
 # Configure logging
 logging.basicConfig(
@@ -96,15 +96,15 @@ class FishingMUD:
     async def relocate_fishermen(self) -> None:
         """Move every hidden fisherman on Bubba's clothing restock."""
         moves = self.fishermen.relocate()
-        for _, old_room, _ in moves:
+        for npc, old_room, _ in moves:
             await self.broadcast_to_room(
                 old_room,
-                f"{FISHERMAN_DISPLAY_NAME} packs up their tackle and walks away.",
+                f"{npc.display} packs up their tackle and walks away.",
             )
-        for _, _, new_room in moves:
+        for npc, _, new_room in moves:
             await self.broadcast_to_room(
                 new_room,
-                f"{FISHERMAN_DISPLAY_NAME} arrives, sets down their tackle, and casts.",
+                f"{npc.display} arrives, sets down their tackle, and casts.",
             )
         logger.info("Relocated all fishing NPCs after Bubba restock")
 

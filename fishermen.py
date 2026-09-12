@@ -9,13 +9,13 @@ from typing import Dict, List, Optional, Tuple
 from world import Room
 
 
-FISHERMAN_DISPLAY_NAME = "Tall Fisherman"
 FISHERMAN_COOLDOWN_SECONDS = 60
 
 
 @dataclass(frozen=True)
 class Fisherman:
     name: str
+    display: str
     description: str
     greeting: str
     wrong_name: str
@@ -24,10 +24,23 @@ class Fisherman:
     vague_prefix: str
     exact_prefix: str
 
+    def matches_target(self, target: str) -> bool:
+        cleaned = target.strip().lower()
+        adjective = self.display.replace(" Fisherman", "").lower()
+        return cleaned in {
+            self.display.lower(),
+            adjective,
+            f"{adjective} fisherman",
+            "fisherman",
+            "fisher",
+            self.name.lower(),
+        }
+
 
 FISHERMEN = (
     Fisherman(
         name="Walt",
+        display="Rangy Fisherman",
         description="A rangy older fisherman in a patched canvas coat watches his line without blinking.",
         greeting='"Hello. Name\'s Walt."',
         wrong_name='"That ain\'t my name."',
@@ -38,7 +51,8 @@ FISHERMEN = (
     ),
     Fisherman(
         name="June",
-        description="A tall fisherman in a broad straw hat studies every ripple between patient casts.",
+        display="Hatted Fisherman",
+        description="A patient fisherman in a broad straw hat studies every ripple between casts.",
         greeting='"Hello, name\'s June."',
         wrong_name='"You have me confused with somebody else."',
         elsewhere='"The birds are feeding better over another stretch of water."',
@@ -48,6 +62,7 @@ FISHERMEN = (
     ),
     Fisherman(
         name="Otis",
+        display="Beaded Fisherman",
         description="A lanky fisherman hung with old charms mutters to the bobber as if it can answer.",
         greeting='"Howdy. Otis is the name."',
         wrong_name='"Wrong soul, wrong name."',
@@ -58,7 +73,8 @@ FISHERMEN = (
     ),
     Fisherman(
         name="Mara",
-        description="A tall fisherman in a red scarf keeps immaculate tackle and a guarded eye on the lake.",
+        display="Scarfed Fisherman",
+        description="A precise fisherman in a red scarf keeps immaculate tackle and a guarded eye on the lake.",
         greeting='"Hello. I\'m Mara."',
         wrong_name='"Try the right name next time."',
         elsewhere='"I\'ve seen better action somewhere else, but I\'m not doing all your work."',
@@ -93,14 +109,15 @@ class FishermanManager:
         self._sync_room_displays()
 
     def _sync_room_displays(self) -> None:
+        displays = {npc.display.lower() for npc in FISHERMEN}
         for room_id in self.fishing_room_ids:
             room = self.rooms[room_id]
             room.npcs = [
                 name for name in room.npcs
-                if name.lower() != FISHERMAN_DISPLAY_NAME.lower()
+                if name.lower() not in displays
             ]
-        for room_id in self.assignments.values():
-            self.rooms[room_id].npcs.append(FISHERMAN_DISPLAY_NAME)
+        for npc in FISHERMEN:
+            self.rooms[self.assignments[npc.name]].npcs.append(npc.display)
 
     def in_room(self, room_id: str) -> Optional[Fisherman]:
         for npc in FISHERMEN:
@@ -118,12 +135,6 @@ class FishermanManager:
     def target_named(self, target: str) -> Optional[Fisherman]:
         cleaned = target.strip().lower()
         return next((npc for npc in FISHERMEN if npc.name.lower() == cleaned), None)
-
-    @staticmethod
-    def is_display_target(target: str) -> bool:
-        return target.strip().lower() in {
-            "tall fisherman", "fisherman", "tall", "fisher",
-        }
 
     def begin_interaction(
         self,

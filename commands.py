@@ -20,7 +20,7 @@ from items import (
 )
 from market import Market, StoreType, apply_condition_sell_price, apply_charisma_sell_bonus
 from lake_state import LakeCycleState
-from fishermen import FISHERMAN_DISPLAY_NAME, Fisherman, FishermanManager
+from fishermen import Fisherman, FishermanManager
 
 if TYPE_CHECKING:
     from weather import WeatherSystem
@@ -585,18 +585,15 @@ class GameCommands:
                 return CommandResult(desc)
 
         # Check for NPCs in the room
+        if self.fishermen:
+            fisherman = self.fishermen.in_room(room.id)
+            if fisherman and fisherman.matches_target(target):
+                return CommandResult(
+                    f"\n{fisherman.display.upper()}\n"
+                    f"{fisherman.description}"
+                )
         for npc in room.npcs:
             if target == npc.lower():
-                if (
-                    npc.lower() == FISHERMAN_DISPLAY_NAME.lower()
-                    and self.fishermen
-                ):
-                    fisherman = self.fishermen.in_room(room.id)
-                    if fisherman:
-                        return CommandResult(
-                            f"\n{FISHERMAN_DISPLAY_NAME.upper()}\n"
-                            f"{fisherman.description}"
-                        )
                 desc = NPC_DESCRIPTIONS.get(
                     npc.lower(), f"\n{npc.upper()}\nA local."
                 )
@@ -627,6 +624,11 @@ class GameCommands:
         for npc in room.npcs:
             if npc.lower() == target:
                 return ("npc", npc)
+
+        if self.fishermen:
+            local = self.fishermen.in_room(room.id)
+            if local and local.matches_target(target):
+                return ("npc", local.display)
 
         return None
 
@@ -1323,13 +1325,13 @@ class GameCommands:
                         reply = local.wrong_name
                     else:
                         reply = self._fisherman_fishing_hint(player, local)
-                    lines.append(f"{FISHERMAN_DISPLAY_NAME} says, {reply}")
+                    lines.append(f"{local.display} says, {reply}")
                     broadcasts.append(
-                        f"ROOM:{room.id}:{FISHERMAN_DISPLAY_NAME} says, {reply}"
+                        f"ROOM:{room.id}:{local.display} says, {reply}"
                     )
                 elif state == "ignored":
                     reaction = (
-                        f"{FISHERMAN_DISPLAY_NAME} ignores you and watches the line."
+                        f"{local.display} ignores you and watches the line."
                     )
                     lines.append(reaction)
                     broadcasts.append(f"ROOM:{room.id}:{reaction}")
@@ -1352,15 +1354,6 @@ class GameCommands:
         named_fisherman = (
             self.fishermen.target_named(target) if self.fishermen else None
         )
-        if (
-            not found
-            and local_fisherman
-            and (
-                named_fisherman
-                or self.fishermen.is_display_target(target)
-            )
-        ):
-            found = ("npc", FISHERMAN_DISPLAY_NAME)
         if not found:
             return CommandResult(f"You don't see '{target}' here.")
 
@@ -1376,36 +1369,32 @@ class GameCommands:
             broadcasts.append(
                 f"ROOM:{room.id}:Slick furrows his brow and seems sweatier."
             )
-        elif (
-            name.lower() == FISHERMAN_DISPLAY_NAME.lower()
-            and local_fisherman
-            and self.fishermen
-        ):
+        elif local_fisherman and name.lower() == local_fisherman.display.lower():
             state = self.fishermen.begin_interaction(
                 player.name, local_fisherman
             )
             if state == "active":
                 if named_fisherman and named_fisherman != local_fisherman:
                     reply = local_fisherman.wrong_name
-                    lines.append(f"{FISHERMAN_DISPLAY_NAME} says, {reply}")
+                    lines.append(f"{local_fisherman.display} says, {reply}")
                     broadcasts.append(
-                        f"ROOM:{room.id}:{FISHERMAN_DISPLAY_NAME} says, {reply}"
+                        f"ROOM:{room.id}:{local_fisherman.display} says, {reply}"
                     )
                 elif player.get_effective_attribute("charisma") >= 6:
                     reply = local_fisherman.greeting
-                    lines.append(f"{FISHERMAN_DISPLAY_NAME} says, {reply}")
+                    lines.append(f"{local_fisherman.display} says, {reply}")
                     broadcasts.append(
-                        f"ROOM:{room.id}:{FISHERMAN_DISPLAY_NAME} says, {reply}"
+                        f"ROOM:{room.id}:{local_fisherman.display} says, {reply}"
                     )
                 else:
                     reaction = (
-                        f"{FISHERMAN_DISPLAY_NAME} gives you a guarded nod."
+                        f"{local_fisherman.display} gives you a guarded nod."
                     )
                     lines.append(reaction)
                     broadcasts.append(f"ROOM:{room.id}:{reaction}")
             elif state == "ignored":
                 reaction = (
-                    f"{FISHERMAN_DISPLAY_NAME} ignores you and watches the line."
+                    f"{local_fisherman.display} ignores you and watches the line."
                 )
                 lines.append(reaction)
                 broadcasts.append(f"ROOM:{room.id}:{reaction}")
@@ -1585,23 +1574,26 @@ class GameCommands:
             return CommandResult(f"You don't have a '{item_query}'.")
 
         if kind == "npc":
+            local_fisherman = (
+                self.fishermen.in_room(player.current_room)
+                if self.fishermen else None
+            )
             if (
-                name.lower() == FISHERMAN_DISPLAY_NAME.lower()
+                local_fisherman
+                and name.lower() == local_fisherman.display.lower()
                 and item.id == "ancient_whiskers"
-                and self.fishermen
-                and self.fishermen.in_room(player.current_room)
             ):
                 player.remove_item(item)
                 if self.lake_state:
                     self.lake_state.release()
                 return CommandResult(
                     (
-                        f"You offer {item.display_name} to {FISHERMAN_DISPLAY_NAME}.\n"
+                        f"You offer {item.display_name} to {local_fisherman.display}.\n"
                         "The fisherman recognizes the old carp immediately and "
                         "slips it gently back into the lake."
                     ),
                     broadcast=(
-                        f"ROOM:{player.current_room}:{FISHERMAN_DISPLAY_NAME} "
+                        f"ROOM:{player.current_room}:{local_fisherman.display} "
                         f"returns {item.display_name} to the lake."
                     ),
                 )

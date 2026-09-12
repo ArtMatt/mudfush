@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
 from commands import CATCHABLE_FISH, GameCommands, ReelChallenge
-from fishermen import FISHERMAN_DISPLAY_NAME, FISHERMEN, FishermanManager
+from fishermen import FISHERMEN, FishermanManager
 from items import (
     ANCIENT_WHISKERS,
     BASIC_POLE,
@@ -345,13 +345,18 @@ class FishermanTests(unittest.TestCase):
 
     def test_each_spot_shows_one_generic_but_unique_fisherman(self):
         identities = []
+        displays = []
         for room in self.rooms.values():
             if not room.is_water:
                 continue
-            self.assertEqual(room.npcs.count(FISHERMAN_DISPLAY_NAME), 1)
+            local = self.fishermen.in_room(room.id)
+            self.assertEqual(room.npcs.count(local.display), 1)
             self.assertFalse(any(npc.name in room.npcs for npc in FISHERMEN))
-            identities.append(self.fishermen.in_room(room.id).name)
+            identities.append(local.name)
+            displays.append(local.display)
         self.assertCountEqual(identities, [npc.name for npc in FISHERMEN])
+        self.assertCountEqual(displays, [npc.display for npc in FISHERMEN])
+        self.assertFalse(any("Tall" in display for display in displays))
 
     def test_charisma_six_nod_reveals_hidden_name(self):
         player, local = self._player_with_local_fisherman("charmer", 6)
@@ -385,7 +390,7 @@ class FishermanTests(unittest.TestCase):
         second = self.commands.cmd_nod(player, "fisherman")
         self.assertIn("ignores you", second.message)
         third = self.commands.cmd_say(player, local.name)
-        self.assertNotIn(f"{FISHERMAN_DISPLAY_NAME} says", third.message)
+        self.assertNotIn(f"{local.display} says", third.message)
         self.assertNotIn("ignores you", third.message)
 
     def test_giving_ancient_whiskers_returns_it_without_growth(self):
@@ -394,7 +399,7 @@ class FishermanTests(unittest.TestCase):
         player.add_item(ancient)
         self.state.reserve()
 
-        result = self.commands.cmd_give(player, "ancient to tall fisherman")
+        result = self.commands.cmd_give(player, "ancient to fisherman")
         self.assertIn("back into the lake", result.message)
         self.assertNotIn(ancient, player.inventory)
         self.assertTrue(self.state.available)
@@ -410,7 +415,8 @@ class FishermanTests(unittest.TestCase):
             )
         for room in self.rooms.values():
             if room.is_water:
-                self.assertEqual(room.npcs.count(FISHERMAN_DISPLAY_NAME), 1)
+                local = self.fishermen.in_room(room.id)
+                self.assertEqual(room.npcs.count(local.display), 1)
 
 
 class FishermanBroadcastTests(unittest.IsolatedAsyncioTestCase):
