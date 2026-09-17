@@ -1,10 +1,12 @@
+import asyncio
+import re
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
 from commands import CATCHABLE_FISH, GameCommands, ReelChallenge
-from fishermen import FISHERMEN, FishermanManager
+from fishermen import FISHERMEN, FishermanManager, NPC_CATCH_MAX_SECONDS
 from items import (
     ANCIENT_WHISKERS,
     BASIC_POLE,
@@ -116,6 +118,32 @@ class GameplayQualityTests(unittest.TestCase):
 
         self.assertIn("(0.4 lbs) [614.9/800]", message)
 
+    def test_bubba_quest_payout_slides_a_gem_without_advertising_it(self):
+        player = Player("angler", current_room="store")
+        fish = create_item_copy(BLUEGILL, roll_stats=False, condition=8)
+        fish.fish_size = "average"
+        fish.weight = 0.5
+        player.add_item(fish)
+        self.market.bubba_quest.fish_id = "bluegill"
+        self.market.bubba_quest.fish_name = "bluegill"
+        self.market.bubba_quest.fish_size = "average"
+        self.market.bubba_quest.condition = 8
+        self.market.bubba_quest.target_weight = 0.5
+        self.market.bubba_quest.claimed = False
+
+        listing = self.commands._format_sell_offer_list(player, StoreType.BUBBA)
+        self.assertIn("DOUBLE BOUNTY", listing)
+        self.assertNotRegex(listing.lower(), r"gem")
+        status = "\n".join(self.market.get_bubba_quest_status_lines())
+        self.assertNotRegex(status.lower(), r"gem")
+
+        result = self.commands.cmd_sell(player, "bluegill")
+        gems = [item for item in player.inventory if item.item_type == ItemType.GEM]
+        self.assertEqual(len(gems), 1)
+        self.assertIn("You earned this, too", result.message)
+        self.assertIn(gems[0].display_name, result.message)
+        self.assertNotIn("gem", result.broadcast.lower())
+
     def test_bare_sell_greens_percent_hints_at_wisdom_12(self):
         player = Player("angler", current_room="store")
         player.attributes["wisdom"] = 8
@@ -133,6 +161,14 @@ class GameplayQualityTests(unittest.TestCase):
 
 
 class ReelEventTests(unittest.IsolatedAsyncioTestCase):
+    def test_helpful_reel_chance_is_halved_but_still_caps_at_75(self):
+        chance = MUDSession._helpful_reel_chance
+        self.assertEqual(chance(1, 1), 0.0)
+        self.assertAlmostEqual(chance(5, 5), 15.0)
+        self.assertAlmostEqual(chance(10, 10), 33.75)
+        self.assertEqual(chance(26, 11), 75.0)
+        self.assertEqual(chance(40, 40), 75.0)
+
     async def test_wrong_direction_adds_quarter_of_original_time(self):
         session = MUDSession(Mock(), Mock())
         session.send_message = AsyncMock()
@@ -160,7 +196,7 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
         session.send_message = AsyncMock()
         session.get_input = AsyncMock(return_value="reel")
         challenge = ReelChallenge(
-            total_seconds=50,
+            total_seconds=20,
             response_seconds=3,
             intelligence=10,
             wisdom=10,
@@ -187,8 +223,15 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("You bring the fish in faster", output)
         self.assertAlmostEqual(
             sum(call.args[0] for call in fake_sleep.call_args_list),
-            32.0,
+            11.0,
         )
+
+    def test_helpful_reel_bonus_scales_with_leftover_reaction_time(self):
+        bonus = MUDSession._helpful_reel_bonus
+        self.assertEqual(bonus(5.0), 15.0)
+        self.assertEqual(bonus(1.0), 3.0)
+        self.assertEqual(bonus(0.0), 3.0)
+        self.assertEqual(bonus(4.0), 12.0)
 
 
 class AncientWhiskersTests(unittest.TestCase):
@@ -418,6 +461,28 @@ class FishermanTests(unittest.TestCase):
                 local = self.fishermen.in_room(room.id)
                 self.assertEqual(room.npcs.count(local.display), 1)
 
+    def test_npc_catch_uses_player_room_broadcasts_and_skips_ancient(self):
+        npc = self.fishermen.in_room("old_pier")
+        self.rooms["old_pier"].population = 40
+        with patch("commands.random.randint", return_value=100):
+            miss = self.commands.try_npc_catch(npc, "old_pier")
+        self.assertIsNone(miss)
+
+        self.rooms["old_pier"].population = 100
+        with patch("commands.random.randint", side_effect=[1, 1, 8]):
+            with patch(
+                "commands.random.choices",
+                return_value=[("average", 1.0, 1.0)],
+            ):
+                result = self.commands.try_npc_catch(npc, "old_pier")
+
+        hook, catch, delay = result
+        self.assertEqual(hook, f"{npc.display} hooks a fish!")
+        self.assertRegex(catch, rf"^{re.escape(npc.display)} catches a .+ lb .+!")
+        self.assertNotIn("Ancient Whiskers", catch)
+        self.assertGreaterEqual(delay, 4)
+        self.assertTrue(self.state.available)
+
 
 class FishermanBroadcastTests(unittest.IsolatedAsyncioTestCase):
     async def test_restock_relocation_broadcasts_departures_and_arrivals(self):
@@ -425,6 +490,8 @@ class FishermanBroadcastTests(unittest.IsolatedAsyncioTestCase):
         rooms = create_world()
         game.fishermen = FishermanManager(rooms)
         game.broadcast_to_room = AsyncMock()
+        game._npc_fishing = set()
+        game._fishermen_relocating = False
 
         await game.relocate_fishermen()
 
@@ -438,6 +505,71 @@ class FishermanBroadcastTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(any("walks away" in message for message in messages))
         self.assertTrue(any("arrives" in message for message in messages))
+
+    async def test_relocate_waits_until_active_fights_finish(self):
+        game = FishingMUD.__new__(FishingMUD)
+        rooms = create_world()
+        game.fishermen = FishermanManager(rooms)
+        game.broadcast_to_room = AsyncMock()
+        game._npc_fishing = {"Walt"}
+        game._fishermen_relocating = False
+
+        original = game.fishermen.relocate
+
+        def relocate_when_idle():
+            self.assertEqual(game._npc_fishing, set())
+            return original()
+
+        game.fishermen.relocate = relocate_when_idle
+
+        async def finish_fight():
+            await asyncio.sleep(0.05)
+            game._npc_fishing.clear()
+
+        asyncio.create_task(finish_fight())
+        await game.relocate_fishermen()
+        self.assertFalse(game._fishermen_relocating)
+        self.assertGreater(game.broadcast_to_room.await_count, 0)
+
+    def test_restock_blocks_new_fights_when_imminent(self):
+        game = FishingMUD.__new__(FishingMUD)
+        game._fishermen_relocating = False
+        game.market = Mock()
+        game.market.get_clothing_rotation_remaining.return_value = (
+            NPC_CATCH_MAX_SECONDS
+        )
+        self.assertTrue(game._npc_restock_imminent())
+        game.market.get_clothing_rotation_remaining.return_value = (
+            NPC_CATCH_MAX_SECONDS + 1
+        )
+        self.assertFalse(game._npc_restock_imminent())
+        game._fishermen_relocating = True
+        self.assertTrue(game._npc_restock_imminent(4))
+
+    async def test_npc_catch_broadcasts_hook_then_landing(self):
+        game = FishingMUD.__new__(FishingMUD)
+        game.fishermen = Mock()
+        game.fishermen.assignments = {"Walt": "old_pier"}
+        game.broadcast_to_room = AsyncMock()
+        game._npc_fishing = set()
+
+        with patch("mud_server.asyncio.sleep", new=AsyncMock()):
+            await game._play_npc_catch(
+                "Walt",
+                "old_pier",
+                "Rangy Fisherman hooks a fish!",
+                "Rangy Fisherman catches a 1.2 lb bluegill!",
+                4,
+            )
+
+        messages = [call.args[1] for call in game.broadcast_to_room.await_args_list]
+        self.assertEqual(
+            messages,
+            [
+                "Rangy Fisherman hooks a fish!",
+                "Rangy Fisherman catches a 1.2 lb bluegill!",
+            ],
+        )
 
 
 if __name__ == "__main__":

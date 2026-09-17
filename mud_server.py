@@ -21,7 +21,7 @@ from commands import GameCommands, CommandResult
 from weather import WeatherSystem, WeatherType
 from market import Market
 from lake_state import LakeCycleState
-from fishermen import FishermanManager
+from fishermen import FISHERMEN, FishermanManager, NPC_CATCH_MAX_SECONDS
 
 # Configure logging
 logging.basicConfig(
@@ -56,6 +56,9 @@ class FishingMUD:
         self._ground_loot_task = None
         self._scavenger_task = None
         self._clothing_degrade_task = None
+        self._fisherman_fish_tasks = []
+        self._npc_fishing: Set[str] = set()
+        self._fishermen_relocating = False
         self.shutdown_event = asyncio.Event()
         self.started_at = time.time()
         
@@ -95,18 +98,32 @@ class FishingMUD:
 
     async def relocate_fishermen(self) -> None:
         """Move every hidden fisherman on Bubba's clothing restock."""
-        moves = self.fishermen.relocate()
-        for npc, old_room, _ in moves:
-            await self.broadcast_to_room(
-                old_room,
-                f"{npc.display} packs up their tackle and walks away.",
-            )
-        for npc, _, new_room in moves:
-            await self.broadcast_to_room(
-                new_room,
-                f"{npc.display} arrives, sets down their tackle, and casts.",
-            )
-        logger.info("Relocated all fishing NPCs after Bubba restock")
+        self._fishermen_relocating = True
+        try:
+            while self._npc_fishing:
+                await asyncio.sleep(0.05)
+            moves = self.fishermen.relocate()
+            for npc, old_room, _ in moves:
+                await self.broadcast_to_room(
+                    old_room,
+                    f"{npc.display} packs up their tackle and walks away.",
+                )
+            for npc, _, new_room in moves:
+                await self.broadcast_to_room(
+                    new_room,
+                    f"{npc.display} arrives, sets down their tackle, and casts.",
+                )
+            logger.info("Relocated all fishing NPCs after Bubba restock")
+        finally:
+            self._fishermen_relocating = False
+
+    def _npc_restock_imminent(self, fight_seconds: float = NPC_CATCH_MAX_SECONDS) -> bool:
+        """True if a restock move is in progress or too close to start a fight."""
+        if self._fishermen_relocating:
+            return True
+        if not self.market:
+            return False
+        return self.market.get_clothing_rotation_remaining() <= fight_seconds
 
     async def start_population_updates(self, interval: int = 120):
         """Update fish populations and weather together."""
@@ -128,6 +145,46 @@ class FishingMUD:
             f"Fish population & weather updates started "
             f"(every {interval} seconds)"
         )
+
+    async def start_fisherman_fishing(self):
+        """Let lake NPCs occasionally hook and land fish in their rooms."""
+        async def one_loop(npc_name: str):
+            while True:
+                await asyncio.sleep(random.randint(90, 180))
+                if npc_name in self._npc_fishing:
+                    continue
+                if self._npc_restock_imminent():
+                    continue
+                npc = next(person for person in FISHERMEN if person.name == npc_name)
+                room_id = self.fishermen.assignments.get(npc.name)
+                result = self.commands.try_npc_catch(npc, room_id)
+                if not result:
+                    continue
+                hook, catch, delay = result
+                if self._npc_restock_imminent(delay):
+                    continue
+                await self._play_npc_catch(npc.name, room_id, hook, catch, delay)
+
+        self._fisherman_fish_tasks = [
+            asyncio.create_task(one_loop(npc.name)) for npc in FISHERMEN
+        ]
+        logger.info("Lake fishermen will occasionally catch fish")
+
+    async def _play_npc_catch(
+        self,
+        npc_name: str,
+        room_id: str,
+        hook: str,
+        catch: str,
+        delay: float,
+    ) -> None:
+        self._npc_fishing.add(npc_name)
+        try:
+            await self.broadcast_to_room(room_id, hook)
+            await asyncio.sleep(delay)
+            await self.broadcast_to_room(room_id, catch)
+        finally:
+            self._npc_fishing.discard(npc_name)
 
     async def start_ground_loot_resets(self, interval: int = 3600):
         """Clear and respawn ground items every hour."""
@@ -241,6 +298,10 @@ class FishingMUD:
         if self._clothing_degrade_task:
             self._clothing_degrade_task.cancel()
             self._clothing_degrade_task = None
+        if self._fisherman_fish_tasks:
+            for task in self._fisherman_fish_tasks:
+                task.cancel()
+            self._fisherman_fish_tasks = []
     
     def register_session(self, player_name: str, session: 'MUDSession'):
         """Register a session for a player."""
@@ -1108,21 +1169,33 @@ class MUDSession:
         finally:
             await self.cleanup()
 
+    @staticmethod
+    def _helpful_reel_chance(intelligence: int, wisdom: int) -> float:
+        """Percent chance a helpful reel event fires. Caps at the old 75%."""
+        mental_score = 2 * intelligence + wisdom
+        return min(75.0, max(0.0, 1.25 * (mental_score - 3)))
+
+    @staticmethod
+    def _helpful_reel_bonus(seconds_left: float) -> float:
+        """Seconds removed for a successful HRE: leftover reaction × 3, 3–15."""
+        return min(15.0, max(3.0, 3.0 * max(0.0, seconds_left)))
+
     async def _run_reel_challenge(self, challenge) -> None:
         """
         Run a dynamic reel timer.
 
         Direction mistakes add 25% of the original duration. Helpful mental
-        events can remove 15 seconds, and time spent answering those events
-        continues to count down the reel.
+        events remove leftover reaction time × 3 (3–15 seconds), and time
+        spent answering those events continues to count down the reel.
         """
         original = float(challenge.total_seconds)
         remaining = original
         response_seconds = max(2, int(challenge.response_seconds))
         direction_in = 40.0
         helpful_in = 5.0
-        mental_score = 2 * challenge.intelligence + challenge.wisdom
-        helpful_chance = min(75.0, max(0.0, 2.5 * (mental_score - 3)))
+        helpful_chance = self._helpful_reel_chance(
+            challenge.intelligence, challenge.wisdom
+        )
         helpful_actions = ("reel", "pull", "slack", "yank")
 
         progress = [
@@ -1221,8 +1294,9 @@ class MUDSession:
                     helpful_in -= elapsed
 
                     if answer.strip().lower() == action:
-                        saved = min(15.0, remaining)
-                        remaining -= saved
+                        leftover = max(0.0, window - elapsed)
+                        saved = self._helpful_reel_bonus(leftover)
+                        remaining = max(0.0, remaining - saved)
                         await self.send_message(
                             f"Perfect {action}! You bring the fish in faster.\n"
                         )
@@ -1425,6 +1499,7 @@ async def start_server(host: str = '0.0.0.0', port: int = 2222):
     await game.start_ground_loot_resets(interval=3600)  # Ground items every hour
     await game.start_scavenger_cleanup(interval=10800)  # Clear clutter every 3 hours
     await game.start_clothing_degrade(interval=1800)  # Worn clothes every 30 min
+    await game.start_fisherman_fishing()
     admin_task = asyncio.create_task(run_admin_console(game))
     
     logger.info(f"")

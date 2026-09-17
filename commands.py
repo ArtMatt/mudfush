@@ -20,7 +20,7 @@ from items import (
 )
 from market import Market, StoreType, apply_condition_sell_price, apply_charisma_sell_bonus
 from lake_state import LakeCycleState
-from fishermen import Fisherman, FishermanManager
+from fishermen import Fisherman, FishermanManager, NPC_CATCH_MAX_SECONDS
 
 if TYPE_CHECKING:
     from weather import WeatherSystem
@@ -1030,14 +1030,7 @@ class GameCommands:
             f"You start reeling it in...{reel_hint}"
         )
         hook_broadcast = f"ROOM:{room.id}:{player.name} hooks a fish!"
-
-        excitement = ""
-        if caught_fish.value >= 100 or fish_copy.fish_size == "trophy":
-            excitement = " What an extraordinary catch!"
-        elif caught_fish.value >= 40 or fish_copy.fish_size == "large":
-            excitement = " What a catch!"
-        elif caught_fish.value >= 20:
-            excitement = " Nice one!"
+        excitement = self._catch_excitement(caught_fish, fish_copy)
 
         def finish_catch():
             degrade_msgs = player.degrade_fishing_gear()
@@ -1107,9 +1100,66 @@ class GameCommands:
             ),
             deferred=finish_catch,
             broadcast=(
-                f"ROOM:{room.id}:{player.name} catches a "
-                f"{fish_copy.weight} lb {fish_copy.display_name}!{excitement}"
+                f"ROOM:{room.id}:{self._catch_broadcast(player.name, fish_copy, excitement)}"
             ),
+        )
+
+    @staticmethod
+    def _catch_excitement(species: Item, caught: Item) -> str:
+        """Room-visible flourish for a landed fish."""
+        if species.value >= 100 or caught.fish_size == "trophy":
+            return " What an extraordinary catch!"
+        if species.value >= 40 or caught.fish_size == "large":
+            return " What a catch!"
+        if species.value >= 20:
+            return " Nice one!"
+        return ""
+
+    @staticmethod
+    def _hook_broadcast(actor: str) -> str:
+        return f"{actor} hooks a fish!"
+
+    @staticmethod
+    def _catch_broadcast(actor: str, fish: Item, excitement: str) -> str:
+        return f"{actor} catches a {fish.weight} lb {fish.display_name}!{excitement}"
+
+    def try_npc_catch(self, fisherman: Fisherman, room_id: str):
+        """
+        Occasionally land a fish as a lake NPC.
+
+        Returns (hook_message, catch_message, reel_seconds) or None on a miss.
+        Never takes Ancient Whiskers out of the pool.
+        """
+        room = self.rooms.get(room_id)
+        if not room or not room.is_water:
+            return None
+
+        population = room.population or 0
+        fish_modifier = 1.0
+        rare_modifier = 1.0
+        if self.weather:
+            weather = self.weather.get_current_weather()
+            fish_modifier = weather.fish_modifier
+            rare_modifier = weather.rare_fish_modifier
+        if population in (0, 100):
+            catch_chance = population
+        else:
+            catch_chance = max(0, min(100, int(population * fish_modifier)))
+        if random.randint(1, 100) > catch_chance:
+            return None
+
+        species = self._select_fish(
+            fishing_power=5,
+            rare_modifier=rare_modifier,
+            allow_ancient=False,
+        )
+        caught = self._create_sized_fish(species)
+        excitement = self._catch_excitement(species, caught)
+        reel_seconds = float(max(4, min(NPC_CATCH_MAX_SECONDS, round(2 + caught.weight))))
+        return (
+            self._hook_broadcast(fisherman.display),
+            self._catch_broadcast(fisherman.display, caught, excitement),
+            reel_seconds,
         )
 
     def _fish_weight_hint(self, weight: float) -> str:
@@ -1142,6 +1192,7 @@ class GameCommands:
         fishing_power: int,
         rare_modifier: float,
         player: Optional[Player] = None,
+        allow_ancient: bool = True,
     ) -> Item:
         """Select a fish species using rarity, gear, and weather."""
         adjusted_weights = []
@@ -1158,7 +1209,8 @@ class GameCommands:
             cumulative += weight
             if roll <= cumulative:
                 if (
-                    fish.id == "legendary_carp"
+                    allow_ancient
+                    and fish.id == "legendary_carp"
                     and self.lake_state
                     and self.lake_state.available
                     and random.randint(1, 100) == 1
@@ -2016,10 +2068,14 @@ TIPS:
             room = self.rooms.get(player.current_room)
             quest = self.market.get_bubba_quest() if self.market else None
             target = quest.colored_target() if quest else item.display_name
+            gem = create_gem()
+            player.add_item(gem)
             return CommandResult(
                 message=(
                     f'Bubba\'s eyes light up. "That\'s the one!"\n'
                     f"He pays double for your {target}: {sell_price} gold.\n"
+                    f'"You earned this, too." Bubba slides a {gem.display_name} '
+                    f"across the counter.\n"
                     f"You now have {player.gold} gold."
                 ),
                 broadcast=(

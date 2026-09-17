@@ -10,6 +10,7 @@ from world import Room
 
 
 FISHERMAN_COOLDOWN_SECONDS = 60
+NPC_CATCH_MAX_SECONDS = 25
 
 
 @dataclass(frozen=True)
