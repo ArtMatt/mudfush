@@ -15,7 +15,7 @@ from items import (
     colorize_condition, colorize_fish_size, UNSELLABLE_TYPES,
     BLUEGILL, BASS, CATFISH, TROUT, PIKE, LEGENDARY_CARP,
     MUD_CARP, PEBBLE_PERCH, MOON_DARTER, WALLEYE,
-    STING_PUFFER, ZEN_GUPPY,
+    STING_PUFFER, ZEN_GUPPY, SPECIALTY_LURE,
 )
 
 
@@ -107,6 +107,8 @@ class Market:
     SLICK_CLOTHING_MIN = 2
     SLICK_CLOTHING_MAX = 4
     CLOTHING_ROTATION_SECONDS = 3600  # 1 hour
+    BUBBA_UNLIMITED_GEAR_IDS = frozenset({"basic_pole"})
+    BUBBA_ONLY_IDS = frozenset({"bucket_of_chum", "lure_kit"})
     
     def __init__(self):
         self.prices: Dict[str, Dict[str, PriceInfo]] = {
@@ -122,6 +124,7 @@ class Market:
             StoreType.BUBBA.value: {},
             StoreType.SLICK.value: {},
         }
+        self.bubba_gear_stock: Dict[str, int] = {}
         self.last_update: float = time.time()
         self.last_clothing_rotation: float = time.time()
         self.bubba_quest: Optional[BubbaFishQuest] = None
@@ -186,6 +189,15 @@ class Market:
                 trend=random.choice([-1, 0, 1]),
                 volatility=0.5  # 50% swings on fish!
             )
+
+        # Finished specialty lures are not sold, but Slick will lowball them.
+        self.prices[StoreType.SLICK.value][SPECIALTY_LURE.id] = PriceInfo(
+            base_price=SPECIALTY_LURE.value,
+            current_buy_price=0,
+            current_sell_price=int(SPECIALTY_LURE.value * 0.4),
+            trend=random.choice([-1, 0, 1]),
+            volatility=0.35,
+        )
     
     def rotate_clothing_stock(self, announce: bool = True) -> Dict[str, int]:
         """
@@ -209,8 +221,37 @@ class Market:
             self.clothing_purchases[store_type.value] = {}
             counts[store_type.value] = count
 
+        self.restock_bubba_limited_gear()
         self.last_clothing_rotation = time.time()
         return counts
+
+    def limited_bubba_gear_ids(self) -> List[str]:
+        """Fishing items Bubba stocks one of until the hourly restock."""
+        ids = []
+        for item_id, (item, _) in STORE_INVENTORY.items():
+            if item.item_type == ItemType.WEARABLE:
+                continue
+            if item_id in self.BUBBA_UNLIMITED_GEAR_IDS:
+                continue
+            ids.append(item_id)
+        return ids
+
+    def restock_bubba_limited_gear(self) -> None:
+        """Put one of each limited Bubba fishing item back on the shelf."""
+        self.bubba_gear_stock = {
+            item_id: 1 for item_id in self.limited_bubba_gear_ids()
+        }
+
+    def is_limited_bubba_gear(self, item_id: str) -> bool:
+        return item_id in self.bubba_gear_stock or item_id in self.limited_bubba_gear_ids()
+
+    def take_bubba_limited_gear(self, item_id: str) -> bool:
+        """Remove one limited Bubba item from stock. False if already sold out."""
+        remaining = self.bubba_gear_stock.get(item_id, 0)
+        if remaining <= 0:
+            return False
+        self.bubba_gear_stock[item_id] = remaining - 1
+        return True
 
     def get_clothing_rotation_remaining(self) -> int:
         """Seconds until the next clothing stock rotation."""
@@ -303,9 +344,12 @@ class Market:
         if item_id not in STORE_INVENTORY:
             return False
         item, _ = STORE_INVENTORY[item_id]
+        if store == StoreType.SLICK and item_id in self.BUBBA_ONLY_IDS:
+            return False
         if item.item_type == ItemType.WEARABLE:
             return item_id in self.clothing_stock.get(store.value, [])
-        # Fishing gear is always available
+        if store == StoreType.BUBBA and self.is_limited_bubba_gear(item_id):
+            return self.bubba_gear_stock.get(item_id, 0) > 0
         return True
 
     def get_stocked_clothing(
@@ -683,6 +727,11 @@ class Market:
         if wisdom < 5:
             lines.append("(Higher Wisdom reveals more about shifting prices.)")
         lines.append("Clothing selection changes every hour — one of each per player until then.")
+        if store == StoreType.BUBBA:
+            lines.append(
+                "Better fishing gear is limited to one of each until restock. "
+                "Basic poles are always in stock."
+            )
         if store == StoreType.SLICK and wisdom >= 3:
             lines.append("Check back often—Slick's prices move a lot.")
         

@@ -16,7 +16,9 @@ from items import (
     DEGRADABLE_TYPES, strip_ansi, CONDITION_NAMES, colorize_condition,
     colorize_fish_size, attribute_abbrev, colorize_attribute,
     attribute_color_name, PLASTIC_WORM, create_beer, create_gem,
-    UNSELLABLE_TYPES, GEMMABLE_TYPES,
+    UNSELLABLE_TYPES, GEMMABLE_TYPES, SPECIALTY_LURE, LURE_FORBIDDEN_SPECIES,
+    SPECIALTY_LURE_MAX_MULT, attuned_lure_name, attuned_lure_description,
+    specialty_lure_essence_from_fish,
 )
 from market import Market, StoreType, apply_condition_sell_price, apply_charisma_sell_bonus
 from lake_state import LakeCycleState
@@ -141,6 +143,10 @@ class GameCommands:
             "take": self.cmd_get,
             "pick": self.cmd_get,
             "drop": self.cmd_drop,
+            "use": self.cmd_use,
+            "dump": self.cmd_chum,
+            "chum": self.cmd_chum,
+            "feed": self.cmd_feed,
             "inventory": self.cmd_inventory,
             "inv": self.cmd_inventory,
             "i": self.cmd_inventory,
@@ -529,6 +535,230 @@ class GameCommands:
             message=f"You drop the {item.display_name}.",
             broadcast=f"ROOM:{room.id}:{player.name} drops {item.display_name}."
         )
+
+    def cmd_use(self, player: Player, item_name: str) -> CommandResult:
+        """Use a carried consumable, or feed a fish into a specialty lure."""
+        if not item_name:
+            return CommandResult("Use what?")
+        lure, fish = self._find_lure_and_fish(player, item_name)
+        if lure and fish:
+            return self._feed_specialty_lure(player, lure, fish)
+        item = player.find_item(item_name)
+        if not item:
+            return CommandResult(f"You're not carrying a '{item_name}'.")
+        if item.id == "bucket_of_chum":
+            return self.cmd_chum(player, item_name)
+        if item.is_specialty_lure():
+            return CommandResult(
+                "Sacrifice a fish to this lure: use <lure> <fish> "
+                "(or feed <fish>)."
+            )
+        if item.item_type == ItemType.FISH:
+            lure = self._first_specialty_lure(player)
+            if lure:
+                return self._feed_specialty_lure(player, lure, item)
+            return CommandResult(
+                "You need a specialty lure to sacrifice that fish into."
+            )
+        return CommandResult(f"You can't find a use for {item.display_name} here.")
+
+    def cmd_feed(self, player: Player, args: str) -> CommandResult:
+        """Sacrifice a fish to attune or strengthen a specialty lure."""
+        if not args:
+            return CommandResult(
+                "Feed what? Usage: feed <lure> <fish> (or feed <fish>)"
+            )
+        lure, fish = self._find_lure_and_fish(player, args)
+        if lure and fish:
+            return self._feed_specialty_lure(player, lure, fish)
+        fish = self._find_typed_item(player, args, item_type=ItemType.FISH)
+        if fish and fish.item_type == ItemType.FISH:
+            lure = self._first_specialty_lure(player)
+            if lure:
+                return self._feed_specialty_lure(player, lure, fish)
+            return CommandResult(
+                "You need a specialty lure to sacrifice that fish into."
+            )
+        lure = self._find_typed_item(player, args, specialty_lure=True)
+        if lure and lure.is_specialty_lure():
+            return CommandResult(
+                "Sacrifice a fish to this lure: feed <lure> <fish>."
+            )
+        return CommandResult(
+            "Feed a fish into a specialty lure: feed <lure> <fish>."
+        )
+
+    @staticmethod
+    def _first_specialty_lure(player: Player) -> Optional[Item]:
+        for item in player.inventory:
+            if item.is_specialty_lure():
+                return item
+        return None
+
+    @staticmethod
+    def _find_typed_item(
+        player: Player,
+        query: str,
+        item_type: Optional[ItemType] = None,
+        specialty_lure: bool = False,
+    ) -> Optional[Item]:
+        """Find an inventory item, optionally restricted by type."""
+        query = query.strip()
+        if not query:
+            return None
+        for item in player.inventory:
+            if not item.matches(query):
+                continue
+            if specialty_lure and not item.is_specialty_lure():
+                continue
+            if item_type is not None and item.item_type != item_type:
+                continue
+            return item
+        return None
+
+    def _find_lure_and_fish(
+        self, player: Player, args: str
+    ) -> tuple[Optional[Item], Optional[Item]]:
+        """Parse two inventory items and return (specialty lure, fish)."""
+        text = args.strip()
+        if not text:
+            return None, None
+        lowered = text.lower()
+        pairs: List[tuple[str, str]] = []
+        for sep in (" with ", " on ", " into ", " to "):
+            if sep in lowered:
+                idx = lowered.find(sep)
+                pairs.append((text[:idx].strip(), text[idx + len(sep):].strip()))
+        parts = text.split()
+        for i in range(1, len(parts)):
+            pairs.append((" ".join(parts[:i]), " ".join(parts[i:])))
+        seen = set()
+        for left, right in pairs:
+            key = (left.lower(), right.lower())
+            if not left or not right or key in seen:
+                continue
+            seen.add(key)
+            first = self._find_typed_item(
+                player, left, specialty_lure=True
+            ) or self._find_typed_item(player, left, item_type=ItemType.FISH)
+            second = self._find_typed_item(
+                player, right, item_type=ItemType.FISH
+            ) or self._find_typed_item(player, right, specialty_lure=True)
+            if not first or not second or first is second:
+                continue
+            lure = first if first.is_specialty_lure() else second
+            fish = second if first.is_specialty_lure() else first
+            if lure.is_specialty_lure() and fish.item_type == ItemType.FISH:
+                return lure, fish
+        return None, None
+
+    def _feed_specialty_lure(
+        self, player: Player, lure: Item, fish: Item
+    ) -> CommandResult:
+        """Lock or strengthen a specialty lure by sacrificing a fish."""
+        if not lure.is_specialty_lure():
+            return CommandResult(
+                "Only a blank specialty lure from Bubba's kit can be attuned."
+            )
+        if player.current_room != "bubba_workshop":
+            return CommandResult(
+                "Bubba keeps his vise, scent pans, and lure press in the "
+                "workshop west of the store porch. That's the only place "
+                "he'll let you work a specialty lure."
+            )
+        if fish.item_type != ItemType.FISH:
+            return CommandResult("You can only sacrifice a fish to that lure.")
+        if fish.id in LURE_FORBIDDEN_SPECIES:
+            return CommandResult(
+                f"The {fish.plain_display_name} is too rare and wild to bottle "
+                "into a lure."
+            )
+        if lure.attracts_fish_id and fish.id != lure.attracts_fish_id:
+            species = self._fish_species_by_id(lure.attracts_fish_id)
+            wanted = species.name if species else lure.attracts_fish_id
+            return CommandResult(
+                f"This lure already hungers for {wanted}. "
+                "Only that species will strengthen it."
+            )
+        if lure.species_attraction_multiplier() >= SPECIALTY_LURE_MAX_MULT:
+            return CommandResult(
+                "The lure is already saturated with that scent. "
+                "You keep the fish."
+            )
+
+        first_attune = lure.attracts_fish_id is None
+        species = self._fish_species_by_id(fish.id) or fish
+        gained = specialty_lure_essence_from_fish(fish, species)
+        player.remove_item(fish)
+        lure.attracts_fish_id = fish.id
+        lure.lure_essence = round(lure.lure_essence + gained, 2)
+        lure.name = attuned_lure_name(species)
+        lure.description = attuned_lure_description(species)
+        multiplier = lure.species_attraction_multiplier()
+        if first_attune:
+            return CommandResult(
+                message=(
+                    f"You clamp the blank lure in Bubba's bench vise and work "
+                    f"the {fish.plain_display_name} into the paint and belly. "
+                    f"The shed fills with the scent of {species.name}. "
+                    f"(Now {multiplier:.2f}× for that species.)"
+                ),
+                broadcast=(
+                    f"ROOM:{player.current_room}:{player.name} attunes a "
+                    "specialty lure at Bubba's workbench."
+                ),
+            )
+        return CommandResult(
+            message=(
+                f"You render the {fish.plain_display_name} down in Bubba's "
+                f"iron pan and steep the lure in the oil. The {species.name} "
+                f"scent grows stronger. "
+                f"(Now {multiplier:.2f}×, {lure.lure_essence:.1f} typical "
+                f"{species.name} sacrificed.)"
+            ),
+            broadcast=(
+                f"ROOM:{player.current_room}:{player.name} feeds a fish "
+                "into a specialty lure at the workbench."
+            ),
+        )
+
+    def _fish_species_by_id(self, fish_id: str) -> Optional[Item]:
+        for fish, _ in CATCHABLE_FISH:
+            if fish.id == fish_id:
+                return fish
+        return None
+
+    def cmd_chum(self, player: Player, item_name: str) -> CommandResult:
+        """Dump one bucket of chum into the current fishing spot."""
+        query = item_name.strip() or "chum"
+        item = player.find_item(query)
+        if not item or item.id != "bucket_of_chum":
+            return CommandResult("You need a bucket of chum to do that.")
+
+        room = self.rooms.get(player.current_room)
+        if not room or not room.is_water:
+            return CommandResult(
+                "Save that for a fishing spot—dumping chum here would be a waste."
+            )
+
+        gain = room.apply_chum(10)
+        if gain <= 0:
+            return CommandResult(
+                "This spot is already teeming with fish. You keep the chum sealed."
+            )
+
+        player.remove_item(item)
+        return CommandResult(
+            message=(
+                "You dump the bucket of chum into the water. An oily slick "
+                f"spreads across the surface, drawing in more fish. "
+                f"(Population +{gain} until the lake shifts.)"
+            ),
+            broadcast=(
+                f"ROOM:{room.id}:{player.name} dumps a bucket of chum into "
+                "the water. An oily slick spreads across the surface."
+            ),
+        )
     
     def cmd_inventory(self, player: Player, args: str) -> CommandResult:
         """Show player inventory, optionally filtered (e.g. inv hat)."""
@@ -684,6 +914,24 @@ class GameCommands:
             lines.append(f"Fishing power: {item.fishing_power}")
         if item.item_type in (ItemType.LURE, ItemType.BAIT):
             lines.append(f"Attraction: {item.attraction}")
+        if item.is_specialty_lure():
+            if item.attracts_fish_id:
+                species = self._fish_species_by_id(item.attracts_fish_id)
+                lines.append(
+                    f"Attuned to: {species.name if species else item.attracts_fish_id}"
+                )
+                lines.append(
+                    f"Scent strength: {item.species_attraction_multiplier():.2f}× "
+                    f"({item.lure_essence:.1f} typical fish sacrificed, "
+                    f"cap {SPECIALTY_LURE_MAX_MULT:.0f}×)"
+                )
+            else:
+                lines.append(
+                    "Attuned to: nothing yet. In Bubba's workshop, use this "
+                    "lure with a fish to lock its species, then feed it more "
+                    "of the same. Size relative to that species matters, "
+                    "not raw pounds."
+                )
         if item.item_type == ItemType.FISH:
             lines.append(f"Weight: {item.weight} lbs")
         if item.item_type == ItemType.TOOLKIT:
@@ -1027,7 +1275,8 @@ class GameCommands:
         hook_message = (
             f"A fish takes the bait — you've hooked something!\n"
             f"{weight_hint}\n"
-            f"You start reeling it in...{reel_hint}"
+            f"You start reeling it in...{reel_hint}\n"
+            "(Type CUT, or press Ctrl-G, to snap the line.)"
         )
         hook_broadcast = f"ROOM:{room.id}:{player.name} hooks a fish!"
         excitement = self._catch_excitement(caught_fish, fish_copy)
@@ -1187,6 +1436,33 @@ class GameCommands:
             )
         return template.format(d=colorize_condition(quality, word))
     
+    def _adjusted_catch_table(
+        self,
+        fishing_power: int,
+        rare_modifier: float,
+        player: Optional[Player] = None,
+    ) -> List[tuple]:
+        """Weighted species table after gear, weather, and specialty lures."""
+        lure = player.equipped_lure if player else None
+        lure_species = (
+            lure.attracts_fish_id
+            if lure and lure.is_specialty_lure() and not lure.is_broken()
+            else None
+        )
+        lure_mult = (
+            lure.species_attraction_multiplier() if lure_species else 1.0
+        )
+        adjusted_weights = []
+        for fish, weight in CATCHABLE_FISH:
+            adjusted_weight = weight
+            if fish.value > 30:
+                adjusted_weight += fishing_power
+                adjusted_weight = int(adjusted_weight * rare_modifier)
+            if lure_species and fish.id == lure_species:
+                adjusted_weight = int(adjusted_weight * lure_mult)
+            adjusted_weights.append((fish, max(1, adjusted_weight)))
+        return adjusted_weights
+
     def _select_fish(
         self,
         fishing_power: int,
@@ -1195,13 +1471,9 @@ class GameCommands:
         allow_ancient: bool = True,
     ) -> Item:
         """Select a fish species using rarity, gear, and weather."""
-        adjusted_weights = []
-        for fish, weight in CATCHABLE_FISH:
-            adjusted_weight = weight
-            if fish.value > 30:
-                adjusted_weight += fishing_power
-                adjusted_weight = int(adjusted_weight * rare_modifier)
-            adjusted_weights.append((fish, max(1, adjusted_weight)))
+        adjusted_weights = self._adjusted_catch_table(
+            fishing_power, rare_modifier, player
+        )
 
         roll = random.randint(1, sum(weight for _, weight in adjusted_weights))
         cumulative = 0
@@ -1723,6 +1995,8 @@ ITEMS:
   get/take/pick <item>  - Pick up an item
   get all               - Pick up everything on the ground
   drop <item>          - Drop an item
+  use <item>           - Use a consumable item
+  use/feed <lure> <fish> - Attune or strengthen a specialty lure (Bubba's Workshop)
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
   examine/ex <item/#>  - Look closely at something (or inventory #)
   equip/eq/wear/don [item] - Show equipment, or equip/wear an item
@@ -1736,7 +2010,9 @@ FISHING:
   fish/cast           - Cast your line (need pole equipped!)
   consider/con        - Estimate a fishing spot's population
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
+  chum/dump chum       - Use chum to briefly improve this fishing spot
   weather             - Check weather (Int+Wis reveals coming patterns)
+  (While reeling: type CUT or press Ctrl-G to snap the line)
 
 SHOPPING (at Bubba's or Slick's):
   list                - See items for sale & prices
@@ -1833,6 +2109,14 @@ TIPS:
                                 f"Bubba shakes his head. \"We're out of {candidate.name} right now. "
                                 "New clothing comes in every hour—check 'list' later.\""
                             )
+                        if (
+                            store_type == StoreType.BUBBA
+                            and self.market.is_limited_bubba_gear(item_id)
+                        ):
+                            return CommandResult(
+                                f'Bubba shakes his head. "I only had one {candidate.name} '
+                                'this shipment. Come back after we restock."'
+                            )
                         continue
                     if (
                         self.market
@@ -1868,6 +2152,11 @@ TIPS:
                     return CommandResult(
                         "Slick squints at you. \"Don't got that right now. Check back later.\""
                     )
+                if self.market.is_limited_bubba_gear(item.id):
+                    return CommandResult(
+                        f'Bubba shakes his head. "I only had one {item.name} '
+                        'this shipment. Come back after we restock."'
+                    )
                 return CommandResult(
                     f"Bubba doesn't have {item.name} for sale right now."
                 )
@@ -1897,10 +2186,24 @@ TIPS:
             return CommandResult(
                 f"You don't have enough gold! The {item.name} costs {price} gold."
             )
+
+        if (
+            self.market
+            and store_type == StoreType.BUBBA
+            and self.market.is_limited_bubba_gear(item.id)
+            and not self.market.take_bubba_limited_gear(item.id)
+        ):
+            return CommandResult(
+                f'Bubba shakes his head. "I only had one {item.name} '
+                'this shipment. Come back after we restock."'
+            )
         
         player.gold -= price
+        bought_kit = item.id == "lure_kit"
         # Store-bought fishing gear is always brand new
-        if item.item_type in DEGRADABLE_TYPES:
+        if bought_kit:
+            new_item = create_item_copy(SPECIALTY_LURE, condition=9)
+        elif item.item_type in DEGRADABLE_TYPES:
             new_item = create_item_copy(item, condition=9)
         else:
             new_item = create_item_copy(item)
@@ -1908,6 +2211,15 @@ TIPS:
         if self.market and item.item_type == ItemType.WEARABLE:
             self.market.mark_clothing_purchased(store_type, player.name, item.id)
         
+        if bought_kit:
+            return CommandResult(
+                f"You buy a specialty lure kit for {price} gold.\n"
+                f"Inside is a {new_item.display_name}. "
+                "Take it west of the porch to Bubba's workshop, then "
+                "sacrifice a fish to attune it. More of that species — "
+                "especially oversized ones — will strengthen it.\n"
+                f"You have {player.gold} gold remaining."
+            )
         if store_type == StoreType.SLICK:
             return CommandResult(
                 f"Slick grins and slides you a {new_item.display_name} for {price} gold.\n"
@@ -1954,7 +2266,9 @@ TIPS:
         
         lines.append("\nLURES & BAIT:")
         for item_id, (item, qty) in STORE_INVENTORY.items():
-            if item.item_type in [ItemType.LURE, ItemType.BAIT]:
+            if item.item_type in [
+                ItemType.LURE, ItemType.BAIT, ItemType.CONSUMABLE, ItemType.MISC
+            ]:
                 lines.append(f"  {item.name:<30} {item.value:>5} gold")
         
         lines.append("\nType 'buy <item name>' to purchase.")

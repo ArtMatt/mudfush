@@ -10,10 +10,16 @@ from fishermen import FISHERMEN, FishermanManager, NPC_CATCH_MAX_SECONDS
 from items import (
     ANCIENT_WHISKERS,
     BASIC_POLE,
+    BASS,
     BLUEGILL,
+    BUCKET_OF_CHUM,
+    LEGENDARY_CARP,
+    MUD_CARP,
+    SPECIALTY_LURE,
     ItemType,
     STORE_INVENTORY,
     create_item_copy,
+    specialty_lure_essence_from_fish,
 )
 from lake_state import LakeCycleState
 from market import Market, StoreType
@@ -159,6 +165,180 @@ class GameplayQualityTests(unittest.TestCase):
         high = self.commands._format_sell_offer_list(player, StoreType.BUBBA)
         self.assertRegex(high, r"\033\[32m\(\+\d+% vs usual\)\033\[0m")
 
+    def test_bubba_limits_better_gear_to_one_until_restock(self):
+        player = Player("angler", current_room="store")
+        player.gold = 10000
+        first = self.commands.cmd_buy(player, "professional")
+        self.assertIn("You buy", first.message)
+        second = self.commands.cmd_buy(player, "professional")
+        self.assertIn("only had one", second.message)
+        poles = [
+            item for item in player.inventory
+            if item.id == "pro_rod"
+        ]
+        self.assertEqual(len(poles), 1)
+
+        listing = self.commands.cmd_list(player, "")
+        self.assertNotIn("professional fishing rod", listing.message)
+        self.assertIn("Basic poles are always in stock", listing.message)
+
+        cheap = self.commands.cmd_buy(player, "basic")
+        again = self.commands.cmd_buy(player, "basic")
+        self.assertIn("You buy", cheap.message)
+        self.assertIn("You buy", again.message)
+        self.assertEqual(
+            len([item for item in player.inventory if item.id == "basic_pole"]),
+            2,
+        )
+
+        self.market.rotate_clothing_stock(announce=False)
+        restocked = self.commands.cmd_buy(player, "professional")
+        self.assertIn("You buy", restocked.message)
+
+    def test_chum_temporarily_raises_a_water_room_one_band(self):
+        room = self.rooms["old_pier"]
+        room.population = 40
+        player = Player("angler", current_room=room.id)
+        player.add_item(create_item_copy(BUCKET_OF_CHUM))
+
+        result = self.commands.cmd_chum(player, "")
+
+        self.assertEqual(room.population, 50)
+        self.assertEqual(room.chum_bonus, 10)
+        self.assertFalse(any(item.id == "bucket_of_chum" for item in player.inventory))
+        self.assertIn("Population +10", result.message)
+        self.assertIn("dumps a bucket of chum", result.broadcast)
+
+        with patch("world.random.choice", return_value=5):
+            room.update_population()
+        self.assertEqual(room.population, 45)
+        self.assertEqual(room.chum_bonus, 0)
+
+    def test_chum_is_not_wasted_at_a_teeming_spot(self):
+        room = self.rooms["old_pier"]
+        room.population = 100
+        player = Player("angler", current_room=room.id)
+        player.add_item(create_item_copy(BUCKET_OF_CHUM))
+
+        result = self.commands.cmd_use(player, "chum")
+
+        self.assertEqual(room.population, 100)
+        self.assertTrue(any(item.id == "bucket_of_chum" for item in player.inventory))
+        self.assertIn("keep the chum sealed", result.message)
+
+    def test_chum_is_bubba_only_and_limited_until_restock(self):
+        self.assertTrue(
+            self.market.is_item_for_sale(StoreType.BUBBA, "bucket_of_chum")
+        )
+        self.assertFalse(
+            self.market.is_item_for_sale(StoreType.SLICK, "bucket_of_chum")
+        )
+
+        player = Player("angler", current_room="store")
+        player.gold = 100
+        first = self.commands.cmd_buy(player, "chum")
+        second = self.commands.cmd_buy(player, "chum")
+        self.assertIn("You buy", first.message)
+        self.assertIn("only had one", second.message)
+
+    def test_lure_kit_is_bubba_only_and_unpacks_a_blank_lure(self):
+        self.assertTrue(self.market.is_item_for_sale(StoreType.BUBBA, "lure_kit"))
+        self.assertFalse(self.market.is_item_for_sale(StoreType.SLICK, "lure_kit"))
+
+        player = Player("angler", current_room="store")
+        player.gold = 1000
+        result = self.commands.cmd_buy(player, "specialty lure kit")
+        self.assertIn("blank specialty lure", result.message)
+        lures = [item for item in player.inventory if item.id == "specialty_lure"]
+        self.assertEqual(len(lures), 1)
+        self.assertIsNone(lures[0].attracts_fish_id)
+        self.assertEqual(player.gold, 0)
+
+        player.gold = 1000
+        sold_out = self.commands.cmd_buy(player, "kit")
+        self.assertIn("only had one", sold_out.message)
+
+    def test_specialty_lure_attunes_then_only_accepts_that_species(self):
+        player = Player("angler", current_room="bubba_workshop")
+        lure = create_item_copy(SPECIALTY_LURE, condition=9)
+        bass = create_item_copy(BASS, roll_stats=False, condition=9)
+        bass.weight = 4.0
+        bluegill = create_item_copy(BLUEGILL, roll_stats=False, condition=9)
+        player.add_item(lure)
+        player.add_item(bass)
+        player.add_item(bluegill)
+
+        first = self.commands.cmd_feed(player, "lure bass")
+        self.assertIn("largemouth bass", first.message)
+        self.assertIn("bench vise", first.message)
+        self.assertEqual(lure.attracts_fish_id, "bass")
+        self.assertAlmostEqual(lure.lure_essence, 1.33)
+        self.assertFalse(any(item.id == "bass" for item in player.inventory))
+
+        refused = self.commands.cmd_use(player, "lure bluegill")
+        self.assertIn("already hungers for largemouth bass", refused.message)
+        self.assertTrue(any(item.id == "bluegill" for item in player.inventory))
+
+        more = create_item_copy(BASS, roll_stats=False, condition=9)
+        more.weight = 4.0
+        player.add_item(more)
+        boosted = self.commands.cmd_feed(player, "bass")
+        self.assertAlmostEqual(lure.lure_essence, 2.66)
+        self.assertIn("2.33×", boosted.message)
+
+    def test_specialty_lure_work_requires_bubba_workshop(self):
+        player = Player("angler", current_room="old_pier")
+        lure = create_item_copy(SPECIALTY_LURE, condition=9)
+        bass = create_item_copy(BASS, roll_stats=False, condition=9)
+        player.add_item(lure)
+        player.add_item(bass)
+        result = self.commands.cmd_feed(player, "lure bass")
+        self.assertIn("workshop west of the store porch", result.message)
+        self.assertTrue(any(item.id == "bass" for item in player.inventory))
+        self.assertIsNone(lure.attracts_fish_id)
+
+    def test_specialty_lure_scores_size_relative_to_the_species(self):
+        average_bass = specialty_lure_essence_from_fish(BASS, BASS)
+        average_carp = specialty_lure_essence_from_fish(MUD_CARP, MUD_CARP)
+        self.assertAlmostEqual(average_bass, 1.0)
+        self.assertAlmostEqual(average_carp, 1.0)
+
+        trophy_bass = create_item_copy(BASS, roll_stats=False)
+        trophy_bass.weight = 3.0 * 1.8
+        trophy_carp = create_item_copy(MUD_CARP, roll_stats=False)
+        trophy_carp.weight = 14.0 * 1.8
+        self.assertAlmostEqual(
+            specialty_lure_essence_from_fish(trophy_bass, BASS),
+            specialty_lure_essence_from_fish(trophy_carp, MUD_CARP),
+        )
+
+    def test_specialty_lure_rejects_legendaries_and_boosts_catch_table(self):
+        player = Player("angler", current_room="bubba_workshop")
+        lure = create_item_copy(SPECIALTY_LURE, condition=9)
+        legend = create_item_copy(LEGENDARY_CARP, roll_stats=False, condition=9)
+        player.add_item(lure)
+        player.add_item(legend)
+        blocked = self.commands.cmd_feed(player, "lure whiskers")
+        self.assertIn("too rare and wild", blocked.message)
+        self.assertTrue(any(item.id == "legendary_carp" for item in player.inventory))
+
+        lure.attracts_fish_id = "bass"
+        lure.lure_essence = 8.0
+        lure.name = "largemouth bass specialty lure"
+        player.equipped_lure = lure
+        plain = dict(
+            (fish.id, weight)
+            for fish, weight in self.commands._adjusted_catch_table(0, 1.0)
+        )
+        boosted = dict(
+            (fish.id, weight)
+            for fish, weight in self.commands._adjusted_catch_table(
+                0, 1.0, player
+            )
+        )
+        self.assertEqual(boosted["bass"], int(plain["bass"] * 3))
+        self.assertEqual(boosted["bluegill"], plain["bluegill"])
+
 
 class ReelEventTests(unittest.IsolatedAsyncioTestCase):
     def test_helpful_reel_chance_is_halved_but_still_caps_at_75(self):
@@ -232,6 +412,27 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bonus(1.0), 3.0)
         self.assertEqual(bonus(0.0), 3.0)
         self.assertEqual(bonus(4.0), 12.0)
+
+    def test_cut_words_are_reel_aborts(self):
+        self.assertTrue(MUDSession._is_reel_abort("cut"))
+        self.assertTrue(MUDSession._is_reel_abort("SNAP"))
+        self.assertFalse(MUDSession._is_reel_abort("reel"))
+        self.assertFalse(MUDSession._is_reel_abort("left"))
+
+    async def test_cut_at_prompt_abandons_the_reel(self):
+        session = MUDSession(Mock(), Mock())
+        session.send_message = AsyncMock()
+        session.get_input = AsyncMock(return_value="cut")
+        challenge = ReelChallenge(
+            total_seconds=40,
+            response_seconds=3,
+            intelligence=1,
+            wisdom=1,
+        )
+        fake_sleep = AsyncMock()
+        with patch("mud_server.asyncio.sleep", new=fake_sleep):
+            landed = await session._run_reel_challenge(challenge)
+        self.assertFalse(landed)
 
 
 class AncientWhiskersTests(unittest.TestCase):

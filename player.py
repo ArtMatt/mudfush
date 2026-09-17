@@ -236,6 +236,8 @@ class Player:
                 "modifier_value": item.modifier_value,
                 "fish_size": item.fish_size,
                 "gem_attribute": item.gem_attribute,
+                "attracts_fish_id": item.attracts_fish_id,
+                "lure_essence": item.lure_essence,
             }
         
         equipped_pole_idx = None
@@ -312,6 +314,8 @@ class Player:
                 modifiers=mods,
                 fish_size=d.get("fish_size"),
                 gem_attribute=d.get("gem_attribute"),
+                attracts_fish_id=d.get("attracts_fish_id"),
+                lure_essence=float(d.get("lure_essence") or 0.0),
             )
         
         inventory = [dict_to_item(item_data) for item_data in data.get("inventory", [])]

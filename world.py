@@ -14,7 +14,7 @@ from items import (
 
 
 # Rooms that never get random ground loot
-NO_GROUND_LOOT_ROOMS = frozenset({"store", "slick_store", "jail"})
+NO_GROUND_LOOT_ROOMS = frozenset({"store", "slick_store", "jail", "bubba_workshop"})
 
 # Common ground finds (item template, relative weight)
 COMMON_GROUND_LOOT: List[Tuple[Item, int]] = [
@@ -41,6 +41,7 @@ class Room:
     items: List[Item] = field(default_factory=list)
     is_water: bool = False  # Can fish here
     population: Optional[int] = None  # Fish population, 0-100%
+    chum_bonus: int = 0  # Temporary population added until the next update
     players: Set[str] = field(default_factory=set)  # Player names currently here
     npcs: List[str] = field(default_factory=list)  # Named NPCs present here
 
@@ -51,7 +52,10 @@ class Room:
     def update_population(self):
         """Change fish population while keeping it in the 0-100 range."""
         if self.is_water:
-            current = self.population or 0
+            # Chum attracts fish temporarily; remove its exact contribution
+            # before applying the lake's normal population movement.
+            current = max(0, (self.population or 0) - self.chum_bonus)
+            self.chum_bonus = 0
             if current <= 0:
                 delta = random.randint(1, 25)
             elif current >= 100:
@@ -61,6 +65,16 @@ class Room:
                     list(range(-25, 0)) + list(range(1, 26))
                 )
             self.population = max(0, min(100, current + delta))
+
+    def apply_chum(self, amount: int = 10) -> int:
+        """Temporarily raise this fishing spot's population, returning gain."""
+        if not self.is_water or amount <= 0:
+            return 0
+        current = self.population or 0
+        gain = min(amount, 100 - current)
+        self.population = current + gain
+        self.chum_bonus += gain
+        return gain
     
     def get_description(self, include_players: bool = True, current_player: str = None) -> str:
         """Get the full room description with items and exits."""
@@ -166,10 +180,27 @@ Type 'buy <item>' to purchase fishing gear, or 'list' to see what's for sale."""
 A creaky rocking chair sits empty beside the door. The smell of 
 earthworms and fish bait drifts out from inside. A dirt path leads 
 south toward the lake, and you can see the glimmer of water in the distance.
-A large stream rushes past the store and winds downhill toward the lake.""",
-        exits={"north": "store", "south": "trail_north"},
+A large stream rushes past the store and winds downhill toward the lake.
+West of the porch, a weathered shed leans against the shop — Bubba's workshop.""",
+        exits={"north": "store", "south": "trail_north", "west": "bubba_workshop"},
         items=[],
         is_water=False
+    )
+
+    rooms["bubba_workshop"] = Room(
+        id="bubba_workshop",
+        name="Bubba's Workshop",
+        description="""A cluttered shed built onto the west side of the store. Pegboard
+walls hold clamps, paint pots, and rows of unfinished lure bodies.
+An iron pan sits over a low burner, stained from years of rendering
+bait oil. The workbench is scarred and sticky, and the whole room
+smells like varnish, lake water, and fish.
+
+This is where Bubba lets customers attune specialty lures. Bring a
+blank lure and a fish: use or feed them here.""",
+        exits={"east": "store_porch"},
+        items=[],
+        is_water=False,
     )
     
     # Trail sections leading to the lake

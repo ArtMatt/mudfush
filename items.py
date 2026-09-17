@@ -13,6 +13,7 @@ class ItemType(Enum):
     FISHING_POLE = "fishing_pole"
     LURE = "lure"
     BAIT = "bait"
+    CONSUMABLE = "consumable"
     FISH = "fish"
     CONTAINER = "container"
     WEARABLE = "wearable"
@@ -44,6 +45,9 @@ INVENTORY_TYPE_FILTERS = {
     "lures": ItemType.LURE,
     "bait": ItemType.BAIT,
     "baits": ItemType.BAIT,
+    "consumable": ItemType.CONSUMABLE,
+    "consumables": ItemType.CONSUMABLE,
+    "chum": ItemType.CONSUMABLE,
     "fish": ItemType.FISH,
     "fishes": ItemType.FISH,
     "toolkit": ItemType.TOOLKIT,
@@ -348,6 +352,8 @@ class Item:
     modifiers: List[Tuple[str, int]] = field(default_factory=list)
     fish_size: Optional[str] = None
     gem_attribute: Optional[str] = None  # For gems: which attribute they enhance
+    attracts_fish_id: Optional[str] = None  # Specialty lure target species
+    lure_essence: float = 0.0  # Sacrificed weight feeding a specialty lure
 
     def __post_init__(self):
         if self.modifiers:
@@ -376,6 +382,15 @@ class Item:
 
     def boosts_attribute(self, attribute: str) -> bool:
         return self.bonus_for(attribute) > 0
+
+    def is_specialty_lure(self) -> bool:
+        return self.id == "specialty_lure"
+
+    def species_attraction_multiplier(self) -> float:
+        """How strongly this lure favors its attuned species (1.0 if blank)."""
+        if not self.attracts_fish_id:
+            return 1.0
+        return specialty_lure_multiplier(self.lure_essence)
 
     def apply_gem(self, gem: "Item") -> Tuple[str, int]:
         """
@@ -429,7 +444,7 @@ class Item:
     @property
     def plain_display_name(self) -> str:
         """Full item name without ANSI colors (matching, logs, uppercase)."""
-        if self.item_type == ItemType.BEER:
+        if self.item_type in (ItemType.BEER, ItemType.CONSUMABLE):
             return self.name
         if self.item_type == ItemType.GEM:
             return self.name
@@ -443,7 +458,7 @@ class Item:
         Full item name including colored condition, fish size, and modifier.
         Examples: 'new wool cap', 'new wool cap of +1 CHA +2 STR'
         """
-        if self.item_type == ItemType.BEER:
+        if self.item_type in (ItemType.BEER, ItemType.CONSUMABLE):
             return self.name
         if self.item_type == ItemType.GEM:
             attr = self.gem_attribute
@@ -594,6 +609,89 @@ MINNOWS = Item(
     value=5,
     attraction=3,
 )
+
+# Consumables
+BUCKET_OF_CHUM = Item(
+    id="bucket_of_chum",
+    name="bucket of chum",
+    description=(
+        "A sealed bucket of Bubba's pungent ground-fish mixture. Dumping it "
+        "into a fishing spot briefly draws more fish into the area."
+    ),
+    item_type=ItemType.CONSUMABLE,
+    value=12,
+    condition=9,
+)
+
+LURE_KIT = Item(
+    id="lure_kit",
+    name="specialty lure kit",
+    description=(
+        "Bubba's expensive custom-lure kit. Buying it unpacks a blank "
+        "specialty lure. Take it west of the porch to his workshop to "
+        "attune it with a sacrificed fish."
+    ),
+    item_type=ItemType.MISC,
+    value=1000,
+    condition=9,
+)
+
+SPECIALTY_LURE = Item(
+    id="specialty_lure",
+    name="blank specialty lure",
+    description=(
+        "An unfinished custom lure. In Bubba's workshop, sacrifice a fish "
+        "to lock it to that species, then feed it more of the same to "
+        "strengthen the scent. Bigger-than-average specimens help more; "
+        "raw heft does not."
+    ),
+    item_type=ItemType.LURE,
+    value=1000,
+    attraction=1,
+)
+
+# Species that cannot be bottled into a specialty lure
+LURE_FORBIDDEN_SPECIES = frozenset({"legendary_carp", "ancient_whiskers"})
+SPECIALTY_LURE_BASE_MULT = 2.0
+SPECIALTY_LURE_ESSENCE_PER_MULT = 8.0
+SPECIALTY_LURE_MAX_MULT = 5.0
+
+
+def specialty_lure_essence_from_fish(fish: Item, species: Optional[Item] = None) -> float:
+    """
+    Score a sacrifice relative to that species' typical weight.
+
+    An average bass and an average mud carp both count as 1.0, so heavy
+    species are not an easier path to a maxed lure. Size still matters:
+    trophy fish contribute more, tiny fish contribute less.
+    """
+    typical = species.weight if species is not None else 0.0
+    if typical <= 0:
+        typical = fish.weight if fish.weight > 0 else 1.0
+    return round(max(0.0, float(fish.weight)) / typical, 2)
+
+
+def specialty_lure_multiplier(essence: float) -> float:
+    """2× at first attunement, up to 5× as typical-fish equivalents accumulate."""
+    bonus = max(0.0, float(essence)) / SPECIALTY_LURE_ESSENCE_PER_MULT
+    return round(
+        min(
+            SPECIALTY_LURE_MAX_MULT,
+            SPECIALTY_LURE_BASE_MULT + bonus,
+        ),
+        2,
+    )
+
+
+def attuned_lure_name(species: Item) -> str:
+    return f"{species.name} specialty lure"
+
+
+def attuned_lure_description(species: Item) -> str:
+    return (
+        f"A custom lure steeped in {species.name} at Bubba's workbench. "
+        "Equip it while fishing to draw that species more often."
+    )
 
 # Fish (caught while fishing)
 BLUEGILL = Item(
@@ -894,6 +992,8 @@ STORE_INVENTORY = {
     "golden_lure": (GOLDEN_LURE, 1),
     "nightcrawlers": (NIGHTCRAWLERS, 15),
     "minnows": (MINNOWS, 10),
+    "bucket_of_chum": (BUCKET_OF_CHUM, 1),
+    "lure_kit": (LURE_KIT, 1),
     "toolkit": (TOOLKIT, 1),  # Rare
     **{item_id: (item, 3) for item_id, item in WEARABLE_ITEMS.items()},
 }
@@ -915,7 +1015,9 @@ def create_item_copy(
     if condition is not None:
         rolled_condition = max(0, min(9, condition))
     elif roll_stats:
-        if item.item_type in (ItemType.BEER, ItemType.GEM):
+        if item.item_type in (
+            ItemType.BEER, ItemType.GEM, ItemType.CONSUMABLE
+        ):
             rolled_condition = 9
         elif item.item_type in EQUIPMENT_TYPES:
             # Store / found gear tends to be usable
@@ -948,4 +1050,6 @@ def create_item_copy(
         modifiers=mods,
         fish_size=item.fish_size,
         gem_attribute=item.gem_attribute,
+        attracts_fish_id=item.attracts_fish_id,
+        lure_essence=item.lure_essence,
     )
