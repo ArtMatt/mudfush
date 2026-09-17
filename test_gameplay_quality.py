@@ -400,18 +400,45 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
             await session._run_reel_challenge(challenge)
 
         output = "".join(call.args[0] for call in session.send_message.call_args_list)
-        self.assertIn("You bring the fish in faster", output)
+        self.assertIn("Solid reel. The fish comes in easier.", output)
         self.assertAlmostEqual(
             sum(call.args[0] for call in fake_sleep.call_args_list),
-            11.0,
+            8.0,
         )
 
-    def test_helpful_reel_bonus_scales_with_leftover_reaction_time(self):
+    def test_helpful_reel_bonus_rounds_reaction_time_up(self):
         bonus = MUDSession._helpful_reel_bonus
-        self.assertEqual(bonus(5.0), 15.0)
-        self.assertEqual(bonus(1.0), 3.0)
-        self.assertEqual(bonus(0.0), 3.0)
-        self.assertEqual(bonus(4.0), 12.0)
+        self.assertEqual(bonus(0.0), 15.0)
+        self.assertEqual(bonus(0.2), 15.0)
+        self.assertEqual(bonus(1.0), 15.0)
+        self.assertEqual(bonus(1.01), 12.0)
+        self.assertEqual(bonus(2.0), 12.0)
+        self.assertEqual(bonus(3.0), 9.0)
+        self.assertEqual(bonus(4.0), 6.0)
+        self.assertEqual(bonus(5.0), 3.0)
+
+    def test_helpful_reel_success_copy_has_five_yank_tiers(self):
+        message = MUDSession._helpful_reel_success_message
+        self.assertEqual(
+            message("yank", 0.4),
+            "Perfect yank! The line sings and the fish surges in.",
+        )
+        self.assertEqual(
+            message("yank", 2.0),
+            "Sharp yank! You steal a long pull of line.",
+        )
+        self.assertEqual(
+            message("yank", 2.2),
+            "Solid yank. The fish comes in easier.",
+        )
+        self.assertEqual(
+            message("yank", 4.0),
+            "A late yank, but you still gain ground.",
+        )
+        self.assertEqual(
+            message("yank", 5.0),
+            "You yank just in time and take a little slack.",
+        )
 
     def test_cut_words_are_reel_aborts(self):
         self.assertTrue(MUDSession._is_reel_abort("cut"))

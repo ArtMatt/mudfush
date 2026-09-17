@@ -7,6 +7,7 @@ Users connect via SSH to play together
 
 import asyncio
 import asyncssh
+import math
 import random
 import sys
 import os
@@ -1199,9 +1200,34 @@ class MUDSession:
         return min(75.0, max(0.0, 1.25 * (mental_score - 3)))
 
     @staticmethod
-    def _helpful_reel_bonus(seconds_left: float) -> float:
-        """Seconds removed for a successful HRE: leftover reaction × 3, 3–15."""
-        return min(15.0, max(3.0, 3.0 * max(0.0, seconds_left)))
+    def _helpful_reel_reaction_bucket(elapsed: float) -> int:
+        """Round reaction time up into 1–5 seconds (≤1s is the fastest bucket)."""
+        if elapsed <= 0:
+            return 1
+        return int(min(5, max(1, math.ceil(elapsed))))
+
+    @staticmethod
+    def _helpful_reel_bonus(elapsed: float) -> float:
+        """
+        Seconds removed for a successful HRE, from rounded-up reaction time.
+
+        1s → 15, 2s → 12, 3s → 9, 4s → 6, 5s → 3.
+        """
+        bucket = MUDSession._helpful_reel_reaction_bucket(elapsed)
+        return float(18 - 3 * bucket)
+
+    @staticmethod
+    def _helpful_reel_success_message(action: str, elapsed: float) -> str:
+        """Flavor for a successful HRE, keyed to how fast the player answered."""
+        bucket = MUDSession._helpful_reel_reaction_bucket(elapsed)
+        lines = (
+            f"Perfect {action}! The line sings and the fish surges in.",
+            f"Sharp {action}! You steal a long pull of line.",
+            f"Solid {action}. The fish comes in easier.",
+            f"A late {action}, but you still gain ground.",
+            f"You {action} just in time and take a little slack.",
+        )
+        return lines[bucket - 1]
 
     @staticmethod
     def _is_reel_abort(text: str) -> bool:
@@ -1228,8 +1254,8 @@ class MUDSession:
         Run a dynamic reel timer.
 
         Direction mistakes add 25% of the original duration. Helpful mental
-        events remove leftover reaction time × 3 (3–15 seconds), and time
-        spent answering those events continues to count down the reel.
+        events round reaction time up (1s → 15s saved, 2s → 12s, down to
+        5s → 3s). Time spent answering those events also counts down the reel.
         """
         original = float(challenge.total_seconds)
         remaining = original
@@ -1375,11 +1401,11 @@ class MUDSession:
                         helpful_in -= elapsed
 
                         if answer.strip().lower() == action:
-                            leftover = max(0.0, window - elapsed)
-                            saved = self._helpful_reel_bonus(leftover)
+                            saved = self._helpful_reel_bonus(elapsed)
                             remaining = max(0.0, remaining - saved)
                             await self.send_message(
-                                f"Perfect {action}! You bring the fish in faster.\n"
+                                self._helpful_reel_success_message(action, elapsed)
+                                + "\n"
                             )
                         elif remaining > 0:
                             await self.send_message(
