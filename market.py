@@ -109,6 +109,7 @@ class Market:
     CLOTHING_ROTATION_SECONDS = 3600  # 1 hour
     BUBBA_QUEST_SECONDS = 3600  # 1 hour, independent of clothing restock
     BUBBA_QUEST_FISH_SALE_REDUCTION = 30  # seconds shaved per extra fish after bounty
+    BUBBA_QUEST_NUDGE_EVERY = 5  # remind on every 5th extra fish, not each sale
     BUBBA_UNLIMITED_GEAR_IDS = frozenset({"basic_pole"})
     BUBBA_ONLY_IDS = frozenset({"bucket_of_chum", "lure_kit"})
     
@@ -131,6 +132,7 @@ class Market:
         self.last_clothing_rotation: float = time.time()
         self.bubba_quest: Optional[BubbaFishQuest] = None
         self.bubba_quest_due_at: float = 0.0
+        self.bubba_post_quest_fish_sales: int = 0
         self._task: Optional[asyncio.Task] = None
         self._clothing_task: Optional[asyncio.Task] = None
         self._quest_task: Optional[asyncio.Task] = None
@@ -306,6 +308,7 @@ class Market:
             target_weight=target_weight,
         )
         self.bubba_quest_due_at = time.time() + self.BUBBA_QUEST_SECONDS
+        self.bubba_post_quest_fish_sales = 0
         self._wake_quest_loop()
         return self.bubba_quest
 
@@ -342,12 +345,21 @@ class Market:
         quest = self.bubba_quest
         if not quest or not quest.claimed:
             return False
+        self.bubba_post_quest_fish_sales += 1
         self.bubba_quest_due_at = max(
             time.time(),
             self.bubba_quest_due_at - self.BUBBA_QUEST_FISH_SALE_REDUCTION,
         )
         self._wake_quest_loop()
         return True
+
+    def bubba_post_quest_sale_should_nudge(self) -> bool:
+        """True on every 5th extra fish sold after the bounty is claimed."""
+        every = self.BUBBA_QUEST_NUDGE_EVERY
+        return (
+            self.bubba_post_quest_fish_sales > 0
+            and self.bubba_post_quest_fish_sales % every == 0
+        )
 
     def _wake_quest_loop(self) -> None:
         if self._quest_wakeup is not None:

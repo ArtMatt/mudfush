@@ -1084,3 +1084,11 @@ def create_item_copy(
         attracts_fish_id=item.attracts_fish_id,
         lure_essence=item.lure_essence,
     )
+
+
+def create_mouth_hooked_golden_lure() -> Item:
+    """A new golden lure with three distinct +1 attribute bonuses."""
+    lure = create_item_copy(GOLDEN_LURE, roll_stats=False, condition=9)
+    attrs = random.sample(list(ATTRIBUTES), 3)
+    lure.set_modifiers([(attr, 1) for attr in attrs])
+    return lure

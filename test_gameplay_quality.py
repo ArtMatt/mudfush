@@ -5,15 +5,23 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
-from commands import CATCHABLE_FISH, GameCommands, ReelChallenge
+from commands import (
+    CATCHABLE_FISH,
+    GEM_CATCH_CHANCE,
+    GameCommands,
+    MOUTH_LURE_CATCH_CHANCE,
+    ReelChallenge,
+)
 from fishermen import FISHERMEN, FishermanManager, NPC_CATCH_MAX_SECONDS
 from items import (
     ANCIENT_WHISKERS,
+    ATTRIBUTES,
     BASIC_POLE,
     BASS,
     BLUEGILL,
     BUCKET_OF_CHUM,
     FISHING_HAT,
+    GOLDEN_LURE,
     LEGENDARY_CARP,
     MUD_CARP,
     NIGHTCRAWLERS,
@@ -24,6 +32,7 @@ from items import (
     ItemType,
     STORE_INVENTORY,
     create_item_copy,
+    create_mouth_hooked_golden_lure,
     specialty_lure_essence_from_fish,
 )
 from lake_state import LakeCycleState
@@ -157,6 +166,62 @@ class GameplayQualityTests(unittest.TestCase):
 
         self.assertIn("(0.4 lbs) [614.9/800]", message)
 
+    def test_rare_catch_can_yield_a_triple_stat_golden_lure(self):
+        player = Player("angler")
+        player.equipped_pole = create_item_copy(BASIC_POLE, condition=9)
+        player.inventory.append(player.equipped_pole)
+        water = next(room for room in self.rooms.values() if room.is_water)
+        player.current_room = water.id
+        water.population = 100
+        caught = create_item_copy(BLUEGILL, roll_stats=False, condition=9)
+        caught.weight = 0.4
+        caught.fish_size = "small"
+        player.degrade_fishing_gear = Mock(return_value=[])
+
+        def randint(low, high):
+            if high == 100:
+                return 1
+            if high == GEM_CATCH_CHANCE:
+                return 2
+            if high == MOUTH_LURE_CATCH_CHANCE:
+                return 1
+            return 2
+
+        with (
+            patch.object(self.commands, "_select_fish", return_value=BLUEGILL),
+            patch.object(self.commands, "_create_sized_fish", return_value=caught),
+            patch("commands.random.randint", side_effect=randint),
+        ):
+            result = self.commands.cmd_fish(player, "")
+            message, extra = result.deferred()
+
+        self.assertIn(
+            "You notice this fish had a lure already hooked in its mouth. "
+            "You carefully remove it.",
+            message,
+        )
+        self.assertIn(
+            "Someone is probably kicking themselves for losing this lure...",
+            message,
+        )
+        self.assertIsNone(extra)
+        lures = [item for item in player.inventory if item.id == "golden_lure"]
+        self.assertEqual(len(lures), 1)
+        self.assertEqual(lures[0].condition, 9)
+        self.assertEqual(len(lures[0].modifiers), 3)
+        self.assertEqual({value for _, value in lures[0].modifiers}, {1})
+        self.assertEqual(len({attr for attr, _ in lures[0].modifiers}), 3)
+        for attr, _ in lures[0].modifiers:
+            self.assertIn(attr, ATTRIBUTES)
+
+    def test_mouth_hooked_golden_lure_has_three_distinct_plus_ones(self):
+        lure = create_mouth_hooked_golden_lure()
+        self.assertEqual(lure.id, GOLDEN_LURE.id)
+        self.assertEqual(lure.condition, 9)
+        self.assertEqual(sorted(lure.modifiers), sorted((a, 1) for a, _ in lure.modifiers))
+        self.assertEqual(len(lure.modifiers), 3)
+        self.assertEqual(len(set(attr for attr, _ in lure.modifiers)), 3)
+
     def test_cut_reminder_only_on_first_two_hooks_this_login(self):
         player = Player("angler")
         player.equipped_pole = create_item_copy(BASIC_POLE, condition=9)
@@ -211,6 +276,8 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(len(gems), 1)
         self.assertIn("You earned this, too", result.message)
         self.assertIn(gems[0].display_name, result.message)
+        self.assertIn(f"(Your gold: {player.gold})", result.message)
+        self.assertNotIn("You now have", result.message)
         self.assertNotIn("gem", result.broadcast.lower())
 
     def test_bubba_quest_timer_is_independent_of_clothing_restock(self):
@@ -252,15 +319,29 @@ class GameplayQualityTests(unittest.TestCase):
             self.assertEqual(self.market.bubba_quest_due_at, before)
 
             extra_sale = self.commands.cmd_sell(player, extra.name)
-            self.assertIn("next request coming sooner", extra_sale.message)
+            self.assertNotIn("next request coming sooner", extra_sale.message)
+            self.assertRegex(
+                extra_sale.message,
+                rf"for \d+ gold\. \(Your gold: {player.gold}\)",
+            )
+            self.assertNotIn("You now have", extra_sale.message)
             self.assertEqual(
                 self.market.bubba_quest_due_at,
                 before - Market.BUBBA_QUEST_FISH_SALE_REDUCTION,
             )
+            self.assertEqual(self.market.bubba_post_quest_fish_sales, 1)
+
+            fifth = create_item_copy(BASS, roll_stats=False, condition=6)
+            player.add_item(fifth)
+            self.market.bubba_post_quest_fish_sales = 4
+            fifth_sale = self.commands.cmd_sell(player, fifth.name)
+            self.assertIn("next request coming sooner", fifth_sale.message)
+            self.assertEqual(self.market.bubba_post_quest_fish_sales, 5)
 
             self.market.bubba_quest_due_at = 110.0
             self.assertTrue(self.market.apply_bubba_post_quest_fish_sale())
             self.assertEqual(self.market.bubba_quest_due_at, 100.0)
+            self.assertFalse(self.market.bubba_post_quest_sale_should_nudge())
 
     def test_bare_sell_greens_percent_hints_at_wisdom_12(self):
         player = Player("angler", current_room="store")
@@ -734,7 +815,7 @@ class AncientWhiskersTests(unittest.TestCase):
 
         player.current_room = "store"
         bubba = self.commands.cmd_sell(player, "ancient")
-        self.assertIn("Bubba pays you 510 gold", bubba.message)
+        self.assertIn("Bubba pays you 510 gold. (Your gold: 560)", bubba.message)
         self.assertIn("tosses it out of the window", bubba.message)
         self.assertEqual(player.gold, 560)
         self.assertEqual(self.state.weight, 47.0)

@@ -16,7 +16,7 @@ from items import (
     DEGRADABLE_TYPES, strip_ansi, CONDITION_NAMES, colorize_condition,
     colorize_fish_size, attribute_abbrev, colorize_attribute,
     attribute_color_name, PLASTIC_WORM, create_beer, create_gem,
-    UNSELLABLE_TYPES, GEMMABLE_TYPES, SPECIALTY_LURE, LURE_FORBIDDEN_SPECIES,
+    create_mouth_hooked_golden_lure, UNSELLABLE_TYPES, GEMMABLE_TYPES, SPECIALTY_LURE, LURE_FORBIDDEN_SPECIES,
     SPECIALTY_LURE_MAX_MULT, attuned_lure_name, attuned_lure_description,
     specialty_lure_essence_from_fish,
 )
@@ -33,6 +33,7 @@ SLICK_WORM_DEAL_COUNT = 3
 SLICK_DEAL_YES = frozenset({"yes", "y", "sure", "deal", "ok", "okay", "yeah", "yep"})
 SLICK_DEAL_NO = frozenset({"no", "n", "nah", "nope", "pass"})
 GEM_CATCH_CHANCE = 200  # 1 in 200
+MOUTH_LURE_CATCH_CHANCE = 300  # 1 in 300 — golden lure in a fish's mouth
 
 ATTRIBUTE_ALIASES = {
     "str": "strength",
@@ -1374,6 +1375,17 @@ class GameCommands:
                     f"ROOM:{room.id}:{player.name} quietly slips something "
                     f"{color} into their pocket."
                 )
+            if random.randint(1, MOUTH_LURE_CATCH_CHANCE) == 1:
+                lure = create_mouth_hooked_golden_lure()
+                player.add_item(lure)
+                lines.append("")
+                lines.append(
+                    "You notice this fish had a lure already hooked in its "
+                    "mouth. You carefully remove it."
+                )
+                lines.append(
+                    "Someone is probably kicking themselves for losing this lure..."
+                )
             if level_lines:
                 lines.append("")
                 lines.extend(level_lines)
@@ -2390,9 +2402,8 @@ TIPS:
                 message=(
                     '"You\'ve caught the legend. I\'ll pay you well so we can '
                     'return him to the water."\n'
-                    f"Bubba pays you {payout} gold.\n"
-                    f"{release_message}\n"
-                    f"You now have {player.gold} gold."
+                    f"Bubba pays you {payout} gold. (Your gold: {player.gold})\n"
+                    f"{release_message}"
                 ),
                 broadcast=f"ROOM:{room.id}:{release_message}",
             )
@@ -2442,7 +2453,7 @@ TIPS:
                 f"Slick tosses {sell_price} gold on the counter. \"Deal.\"",
             ]
             return CommandResult(
-                f"{random.choice(slick_responses)}\nYou now have {player.gold} gold."
+                f"{random.choice(slick_responses)} (Your gold: {player.gold})"
             )
 
         if quest_bonus:
@@ -2454,10 +2465,10 @@ TIPS:
             return CommandResult(
                 message=(
                     f'Bubba\'s eyes light up. "That\'s the one!"\n'
-                    f"He pays double for your {target}: {sell_price} gold.\n"
+                    f"He pays double for your {target}: {sell_price} gold. "
+                    f"(Your gold: {player.gold})\n"
                     f'"You earned this, too." Bubba slides a {gem.display_name} '
-                    f"across the counter.\n"
-                    f"You now have {player.gold} gold."
+                    f"across the counter."
                 ),
                 broadcast=(
                     f'ROOM:{room.id}:Bubba pays {player.name} double for '
@@ -2471,25 +2482,27 @@ TIPS:
             and item.item_type == ItemType.FISH
             and self.market
             and self.market.apply_bubba_post_quest_fish_sale()
+            and self.market.bubba_post_quest_sale_should_nudge()
         ):
             quest_nudge = (
                 "\nBubba already has what he wanted — "
                 "that sale gets the next request coming sooner."
             )
 
+        gold_now = f"(Your gold: {player.gold})"
         cha = player.get_effective_attribute("charisma")
         if item.item_type == ItemType.FISH and cha > 1:
             return CommandResult(
-                f"You sell your {item.display_name} for {sell_price} gold.\n"
+                f"You sell your {item.display_name} for {sell_price} gold. "
+                f"{gold_now}\n"
                 f"Bubba tips his cap — your charm sweetened the deal."
-                f"{quest_nudge}\n"
-                f"You now have {player.gold} gold."
+                f"{quest_nudge}"
             )
         
         return CommandResult(
-            f"You sell your {item.display_name} for {sell_price} gold."
-            f"{quest_nudge}\n"
-            f"You now have {player.gold} gold."
+            f"You sell your {item.display_name} for {sell_price} gold. "
+            f"{gold_now}"
+            f"{quest_nudge}"
         )
 
     def _refuse_equipped_sale(self, store_type: StoreType, item: Item) -> str:
