@@ -550,7 +550,7 @@ class GameCommands:
             return self.cmd_chum(player, item_name)
         if item.is_specialty_lure():
             return CommandResult(
-                "Sacrifice a fish to this lure: use <lure> <fish> "
+                "Sacrifice a fish to this jig: use <jig> <fish> "
                 "(or feed <fish>)."
             )
         if item.item_type == ItemType.FISH:
@@ -558,7 +558,7 @@ class GameCommands:
             if lure:
                 return self._feed_specialty_lure(player, lure, item)
             return CommandResult(
-                "You need a specialty lure to sacrifice that fish into."
+                "You need a custom jig to sacrifice that fish into."
             )
         return CommandResult(f"You can't find a use for {item.display_name} here.")
 
@@ -566,7 +566,7 @@ class GameCommands:
         """Sacrifice a fish to attune or strengthen a specialty lure."""
         if not args:
             return CommandResult(
-                "Feed what? Usage: feed <lure> <fish> (or feed <fish>)"
+                "Feed what? Usage: feed <jig> <fish> (or feed <fish>)"
             )
         lure, fish = self._find_lure_and_fish(player, args)
         if lure and fish:
@@ -577,15 +577,15 @@ class GameCommands:
             if lure:
                 return self._feed_specialty_lure(player, lure, fish)
             return CommandResult(
-                "You need a specialty lure to sacrifice that fish into."
+                "You need a custom jig to sacrifice that fish into."
             )
         lure = self._find_typed_item(player, args, specialty_lure=True)
         if lure and lure.is_specialty_lure():
             return CommandResult(
-                "Sacrifice a fish to this lure: feed <lure> <fish>."
+                "Sacrifice a fish to this jig: feed <jig> <fish>."
             )
         return CommandResult(
-            "Feed a fish into a specialty lure: feed <lure> <fish>."
+            "Feed a fish into a custom jig: feed <jig> <fish>."
         )
 
     @staticmethod
@@ -658,13 +658,13 @@ class GameCommands:
         """Lock or strengthen a specialty lure by sacrificing a fish."""
         if not lure.is_specialty_lure():
             return CommandResult(
-                "Only a blank specialty lure from Bubba's kit can be attuned."
+                "Only a blank jig from Bubba's kit can be attuned."
             )
         if player.current_room != "bubba_workshop":
             return CommandResult(
                 "Bubba keeps his vise, scent pans, and lure press in the "
                 "workshop west of the store porch. That's the only place "
-                "he'll let you work a specialty lure."
+                "he'll let you work a custom jig."
             )
         if fish.item_type != ItemType.FISH:
             return CommandResult("You can only sacrifice a fish to that lure.")
@@ -698,27 +698,27 @@ class GameCommands:
         if first_attune:
             return CommandResult(
                 message=(
-                    f"You clamp the blank lure in Bubba's bench vise and work "
+                    f"You clamp the blank jig in Bubba's bench vise and work "
                     f"the {fish.plain_display_name} into the paint and belly. "
                     f"The shed fills with the scent of {species.name}. "
                     f"(Now {multiplier:.2f}× for that species.)"
                 ),
                 broadcast=(
                     f"ROOM:{player.current_room}:{player.name} attunes a "
-                    "specialty lure at Bubba's workbench."
+                    "jig at Bubba's workbench."
                 ),
             )
         return CommandResult(
             message=(
                 f"You render the {fish.plain_display_name} down in Bubba's "
-                f"iron pan and steep the lure in the oil. The {species.name} "
+                f"iron pan and steep the jig in the oil. The {species.name} "
                 f"scent grows stronger. "
                 f"(Now {multiplier:.2f}×, {lure.lure_essence:.1f} typical "
                 f"{species.name} sacrificed.)"
             ),
             broadcast=(
                 f"ROOM:{player.current_room}:{player.name} feeds a fish "
-                "into a specialty lure at the workbench."
+                "into a jig at the workbench."
             ),
         )
 
@@ -928,9 +928,9 @@ class GameCommands:
             else:
                 lines.append(
                     "Attuned to: nothing yet. In Bubba's workshop, use this "
-                    "lure with a fish to lock its species, then feed it more "
+                    "jig with a fish to lock its species, then feed it more "
                     "of the same. Size relative to that species matters, "
-                    "not raw pounds."
+                    "not raw pounds. Equip with: wear jig."
                 )
         if item.item_type == ItemType.FISH:
             lines.append(f"Weight: {item.weight} lbs")
@@ -1272,12 +1272,17 @@ class GameCommands:
         response_seconds = float(max(2, dexterity + 2))
 
         reel_hint = " pay attention" if reel_seconds >= 40 else ""
-        hook_message = (
-            f"A fish takes the bait — you've hooked something!\n"
-            f"{weight_hint}\n"
-            f"You start reeling it in...{reel_hint}\n"
-            "(Type CUT, or press Ctrl-G, to snap the line.)"
-        )
+        hook_lines = [
+            "A fish takes the bait — you've hooked something!",
+            weight_hint,
+            f"You start reeling it in...{reel_hint}",
+        ]
+        if player.cut_reminders_shown < 2:
+            hook_lines.append(
+                "(Type CUT, or press Ctrl-G, to snap the line.)"
+            )
+            player.cut_reminders_shown += 1
+        hook_message = "\n".join(hook_lines)
         hook_broadcast = f"ROOM:{room.id}:{player.name} hooks a fish!"
         excitement = self._catch_excitement(caught_fish, fish_copy)
 
@@ -1996,7 +2001,7 @@ ITEMS:
   get all               - Pick up everything on the ground
   drop <item>          - Drop an item
   use <item>           - Use a consumable item
-  use/feed <lure> <fish> - Attune or strengthen a specialty lure (Bubba's Workshop)
+  use/feed <jig> <fish>  - Attune or strengthen a custom jig (Bubba's Workshop)
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
   examine/ex <item/#>  - Look closely at something (or inventory #)
   equip/eq/wear/don [item] - Show equipment, or equip/wear an item
@@ -2213,8 +2218,8 @@ TIPS:
         
         if bought_kit:
             return CommandResult(
-                f"You buy a specialty lure kit for {price} gold.\n"
-                f"Inside is a {new_item.display_name}. "
+                f"You buy a jig kit for {price} gold.\n"
+                f"Inside is a {new_item.display_name} (wear jig to equip). "
                 "Take it west of the porch to Bubba's workshop, then "
                 "sacrifice a fish to attune it. More of that species — "
                 "especially oversized ones — will strengthen it.\n"

@@ -100,6 +100,8 @@ class Player:
     beer_confirm_attr: Optional[str] = None
     # Reserved during the reel, before Ancient Whiskers reaches inventory
     ancient_whiskers_reserved: bool = False
+    # Runtime-only: CUT/Ctrl-G hint shown on the first two hooks this login
+    cut_reminders_shown: int = 0
     # Wearables worn since the last timed clothing-degrade tick
     clothes_worn_since_degrade: Set[int] = field(default_factory=set)
 
@@ -299,9 +301,12 @@ class Player:
                         mods.append((attr, val))
             elif d.get("modifier_attribute") and d.get("modifier_value", 0) > 0:
                 mods = [(d["modifier_attribute"], int(d["modifier_value"]))]
+            name = d["name"]
+            if d["id"] == "specialty_lure" and "specialty lure" in name.lower():
+                name = name.replace("specialty lure", "jig")
             return Item(
                 id=d["id"],
-                name=d["name"],
+                name=name,
                 description=d["description"],
                 item_type=ItemType(d["item_type"]),
                 takeable=d.get("takeable", True),
@@ -713,11 +718,12 @@ class Player:
             power += self.equipped_lure.attraction
         return power
 
-    def degrade_fishing_gear(self) -> list:
+    def degrade_fishing_gear(self, *, include_pole: bool = True) -> list:
         """
         Possibly degrade equipped fishing pole/lure after a cast.
         Intelligence (full weight) and Wisdom (half) reduce wear chance.
         Dexterity does not affect gear wear. Clothing is unaffected.
+        Cutting the line never wears the pole (`include_pole=False`).
         """
         messages = []
         wisdom = self.get_effective_attribute("wisdom")
@@ -746,7 +752,11 @@ class Player:
                 f"helped keep its condition"
             )
 
-        for gear in (self.equipped_pole, self.equipped_lure):
+        gear_to_wear = []
+        if include_pole:
+            gear_to_wear.append(self.equipped_pole)
+        gear_to_wear.append(self.equipped_lure)
+        for gear in gear_to_wear:
             if not gear:
                 continue
             roll = random.randint(1, 100)

@@ -58,6 +58,7 @@ class FishingMUD:
         )
         self.sessions: Dict[str, 'MUDSession'] = {}  # player_name -> session
         self._autosave_task = None
+        self._weather_task = None
         self._population_task = None
         self._ground_loot_task = None
         self._scavenger_task = None
@@ -89,11 +90,19 @@ class FishingMUD:
         self._autosave_task = asyncio.create_task(autosave_loop())
         logger.info(f"Auto-save enabled (every {interval} seconds)")
     
-    async def start_weather(self, min_interval: int = 300, max_interval: int = 900):
-        """Weather now changes with fish population updates (no separate timer)."""
-        logger.info(
-            "Weather system ready (changes with fish population updates)"
-        )
+    async def start_weather(self, interval: int = 180):
+        """Change weather on its own timer (population updates stay separate)."""
+        async def weather_loop():
+            while True:
+                await asyncio.sleep(interval)
+                old, new = self.weather.change_weather()
+                if old.weather_type != new.weather_type:
+                    message = self.weather.get_weather_change_message(old, new)
+                    await self.broadcast_to_fishing_rooms(message)
+                    logger.info(f"Weather changed: {old.name} -> {new.name}")
+
+        self._weather_task = asyncio.create_task(weather_loop())
+        logger.info(f"Weather updates started (every {interval} seconds)")
     
     async def start_market(self, interval: int = 600):
         """Start the market system (updates every 10 minutes)."""
@@ -131,8 +140,8 @@ class FishingMUD:
             return False
         return self.market.get_clothing_rotation_remaining() <= fight_seconds
 
-    async def start_population_updates(self, interval: int = 120):
-        """Update fish populations and weather together."""
+    async def start_population_updates(self, interval: int = 300):
+        """Update fish populations (weather has its own timer)."""
         async def population_loop():
             while True:
                 await asyncio.sleep(interval)
@@ -140,17 +149,8 @@ class FishingMUD:
                     room.update_population()
                 logger.info("Updated fish populations")
 
-                old, new = self.weather.change_weather()
-                if old.weather_type != new.weather_type:
-                    message = self.weather.get_weather_change_message(old, new)
-                    await self.broadcast_to_fishing_rooms(message)
-                    logger.info(f"Weather changed: {old.name} -> {new.name}")
-
         self._population_task = asyncio.create_task(population_loop())
-        logger.info(
-            f"Fish population & weather updates started "
-            f"(every {interval} seconds)"
-        )
+        logger.info(f"Fish population updates started (every {interval} seconds)")
 
     async def start_fisherman_fishing(self):
         """Let lake NPCs occasionally hook and land fish in their rooms."""
@@ -291,6 +291,9 @@ class FishingMUD:
         """Stop all background systems."""
         self.stop_autosave()
         self.weather.stop()
+        if self._weather_task:
+            self._weather_task.cancel()
+            self._weather_task = None
         self.market.stop()
         if self._population_task:
             self._population_task.cancel()
@@ -1120,7 +1123,9 @@ class MUDSession:
                                 self.game.commands.release_ancient_whiskers(
                                     self.player
                                 )
-                                degrade = self.player.degrade_fishing_gear()
+                                degrade = self.player.degrade_fishing_gear(
+                                    include_pole=False
+                                )
                                 result.deferred = None
                                 result.broadcast = (
                                     f"ROOM:{self.player.current_room}:"
@@ -1603,9 +1608,9 @@ async def start_server(host: str = '0.0.0.0', port: int = 2222):
     
     # Start background systems
     await game.start_autosave(interval=300)  # Save every 5 minutes
-    await game.start_weather()  # Changes with population updates
+    await game.start_weather(interval=180)  # Weather every 3 min
     await game.start_market(interval=600)  # Market updates every 10 min
-    await game.start_population_updates(interval=120)  # Fish + weather every 2 min
+    await game.start_population_updates(interval=300)  # Fish every 5 min
     await game.start_ground_loot_resets(interval=3600)  # Ground items every hour
     await game.start_scavenger_cleanup(interval=10800)  # Clear clutter every 3 hours
     await game.start_clothing_degrade(interval=1800)  # Worn clothes every 30 min

@@ -15,6 +15,7 @@ from items import (
     BUCKET_OF_CHUM,
     LEGENDARY_CARP,
     MUD_CARP,
+    PLASTIC_WORM,
     SPECIALTY_LURE,
     ItemType,
     STORE_INVENTORY,
@@ -93,6 +94,18 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertIn("EQUIPMENT", result.message)
         self.assertIn("pole", result.message)
 
+    def test_cutting_the_line_never_wears_the_pole(self):
+        player = Player("angler")
+        pole = create_item_copy(BASIC_POLE, condition=9)
+        lure = create_item_copy(PLASTIC_WORM, condition=9)
+        player.inventory.extend([pole, lure])
+        player.equipped_pole = pole
+        player.equipped_lure = lure
+        with patch("player.random.randint", return_value=1):
+            player.degrade_fishing_gear(include_pole=False)
+        self.assertEqual(pole.condition, 9)
+        self.assertLess(lure.condition, 9)
+
     def test_water_room_colors_fish_light_blue(self):
         water = next(room for room in self.rooms.values() if room.is_water)
         self.assertIn(
@@ -123,6 +136,36 @@ class GameplayQualityTests(unittest.TestCase):
             message, _ = result.deferred()
 
         self.assertIn("(0.4 lbs) [614.9/800]", message)
+
+    def test_cut_reminder_only_on_first_two_hooks_this_login(self):
+        player = Player("angler")
+        player.equipped_pole = create_item_copy(BASIC_POLE, condition=9)
+        player.inventory.append(player.equipped_pole)
+        water = next(room for room in self.rooms.values() if room.is_water)
+        player.current_room = water.id
+        water.population = 100
+        caught = create_item_copy(BLUEGILL, roll_stats=False, condition=9)
+        caught.weight = 0.4
+        caught.fish_size = "small"
+        player.degrade_fishing_gear = Mock(return_value=[])
+        reminder = "(Type CUT, or press Ctrl-G, to snap the line.)"
+
+        def hook_text():
+            result = self.commands.cmd_fish(player, "")
+            return result.stages[0].message
+
+        with (
+            patch.object(self.commands, "_select_fish", return_value=BLUEGILL),
+            patch.object(self.commands, "_create_sized_fish", return_value=caught),
+            patch("commands.random.randint", return_value=2),
+        ):
+            first = hook_text()
+            second = hook_text()
+            third = hook_text()
+
+        self.assertIn(reminder, first)
+        self.assertIn(reminder, second)
+        self.assertNotIn(reminder, third)
 
     def test_bubba_quest_payout_slides_a_gem_without_advertising_it(self):
         player = Player("angler", current_room="store")
@@ -247,12 +290,13 @@ class GameplayQualityTests(unittest.TestCase):
 
         player = Player("angler", current_room="store")
         player.gold = 1000
-        result = self.commands.cmd_buy(player, "specialty lure kit")
-        self.assertIn("blank specialty lure", result.message)
+        result = self.commands.cmd_buy(player, "jig kit")
+        self.assertIn("blank jig", result.message)
         lures = [item for item in player.inventory if item.id == "specialty_lure"]
         self.assertEqual(len(lures), 1)
         self.assertIsNone(lures[0].attracts_fish_id)
         self.assertEqual(player.gold, 0)
+        self.assertIn("You attach the", player.equip(lures[0]))
 
         player.gold = 1000
         sold_out = self.commands.cmd_buy(player, "kit")
@@ -268,14 +312,14 @@ class GameplayQualityTests(unittest.TestCase):
         player.add_item(bass)
         player.add_item(bluegill)
 
-        first = self.commands.cmd_feed(player, "lure bass")
+        first = self.commands.cmd_feed(player, "jig bass")
         self.assertIn("largemouth bass", first.message)
         self.assertIn("bench vise", first.message)
         self.assertEqual(lure.attracts_fish_id, "bass")
         self.assertAlmostEqual(lure.lure_essence, 1.33)
         self.assertFalse(any(item.id == "bass" for item in player.inventory))
 
-        refused = self.commands.cmd_use(player, "lure bluegill")
+        refused = self.commands.cmd_use(player, "jig bluegill")
         self.assertIn("already hungers for largemouth bass", refused.message)
         self.assertTrue(any(item.id == "bluegill" for item in player.inventory))
 
@@ -292,7 +336,7 @@ class GameplayQualityTests(unittest.TestCase):
         bass = create_item_copy(BASS, roll_stats=False, condition=9)
         player.add_item(lure)
         player.add_item(bass)
-        result = self.commands.cmd_feed(player, "lure bass")
+        result = self.commands.cmd_feed(player, "jig bass")
         self.assertIn("workshop west of the store porch", result.message)
         self.assertTrue(any(item.id == "bass" for item in player.inventory))
         self.assertIsNone(lure.attracts_fish_id)
@@ -318,13 +362,13 @@ class GameplayQualityTests(unittest.TestCase):
         legend = create_item_copy(LEGENDARY_CARP, roll_stats=False, condition=9)
         player.add_item(lure)
         player.add_item(legend)
-        blocked = self.commands.cmd_feed(player, "lure whiskers")
+        blocked = self.commands.cmd_feed(player, "jig whiskers")
         self.assertIn("too rare and wild", blocked.message)
         self.assertTrue(any(item.id == "legendary_carp" for item in player.inventory))
 
         lure.attracts_fish_id = "bass"
         lure.lure_essence = 8.0
-        lure.name = "largemouth bass specialty lure"
+        lure.name = "largemouth bass jig"
         player.equipped_lure = lure
         plain = dict(
             (fish.id, weight)

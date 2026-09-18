@@ -196,8 +196,8 @@ An iron pan sits over a low burner, stained from years of rendering
 bait oil. The workbench is scarred and sticky, and the whole room
 smells like varnish, lake water, and fish.
 
-This is where Bubba lets customers attune specialty lures. Bring a
-blank lure and a fish: use or feed them here.""",
+This is where Bubba lets customers attune custom jigs. Bring a
+blank jig and a fish: use or feed them here.""",
         exits={"east": "store_porch"},
         items=[],
         is_water=False,

@@ -625,11 +625,11 @@ BUCKET_OF_CHUM = Item(
 
 LURE_KIT = Item(
     id="lure_kit",
-    name="specialty lure kit",
+    name="jig kit",
     description=(
-        "Bubba's expensive custom-lure kit. Buying it unpacks a blank "
-        "specialty lure. Take it west of the porch to his workshop to "
-        "attune it with a sacrificed fish."
+        "Bubba's expensive custom-jig kit. Buying it unpacks a blank "
+        "jig. Take it west of the porch to his workshop to attune it "
+        "with a sacrificed fish."
     ),
     item_type=ItemType.MISC,
     value=1000,
@@ -638,12 +638,12 @@ LURE_KIT = Item(
 
 SPECIALTY_LURE = Item(
     id="specialty_lure",
-    name="blank specialty lure",
+    name="blank jig",
     description=(
-        "An unfinished custom lure. In Bubba's workshop, sacrifice a fish "
+        "An unfinished custom jig. In Bubba's workshop, sacrifice a fish "
         "to lock it to that species, then feed it more of the same to "
         "strengthen the scent. Bigger-than-average specimens help more; "
-        "raw heft does not."
+        "raw heft does not. Equip it with: wear jig"
     ),
     item_type=ItemType.LURE,
     value=1000,
@@ -684,13 +684,14 @@ def specialty_lure_multiplier(essence: float) -> float:
 
 
 def attuned_lure_name(species: Item) -> str:
-    return f"{species.name} specialty lure"
+    return f"{species.name} jig"
 
 
 def attuned_lure_description(species: Item) -> str:
     return (
-        f"A custom lure steeped in {species.name} at Bubba's workbench. "
-        "Equip it while fishing to draw that species more often."
+        f"A custom jig steeped in {species.name} at Bubba's workbench. "
+        "Equip it while fishing to draw that species more often "
+        "(wear jig)."
     )
 
 # Fish (caught while fishing)
