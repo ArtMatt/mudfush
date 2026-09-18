@@ -414,6 +414,22 @@ class Player:
             if not self.is_wearing_or_equipped(item)
         ]
 
+    def sort_inventory_fish(self) -> str:
+        """Keep non-fish in place, then order fish by species, quality, and size."""
+        from items import fish_inventory_sort_key
+
+        non_fish = [
+            item for item in self.inventory if item.item_type != ItemType.FISH
+        ]
+        fish = [
+            item for item in self.inventory if item.item_type == ItemType.FISH
+        ]
+        if not fish:
+            return "You aren't carrying any fish to sort."
+        fish.sort(key=fish_inventory_sort_key)
+        self.inventory = non_fish + fish
+        return "You sort your fish by species, then quality, then size."
+
     def find_item(self, item_name: str) -> Optional[Item]:
         """Find an item in inventory by display number or name."""
         query = item_name.strip().lower().rstrip(")")

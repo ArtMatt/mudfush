@@ -797,6 +797,14 @@ class GameCommands:
     
     def cmd_inventory(self, player: Player, args: str) -> CommandResult:
         """Show player inventory, optionally filtered (e.g. inv hat)."""
+        query = (args or "").strip().lower()
+        if query in ("sort fish", "sortfish"):
+            message = player.sort_inventory_fish()
+            if message.startswith("You aren't"):
+                return CommandResult(message)
+            return CommandResult(
+                message + "\n" + player.get_inventory_display()
+            )
         return CommandResult(player.get_inventory_display(args))
 
     def release_ancient_whiskers(self, player: Player) -> bool:
@@ -2055,6 +2063,7 @@ ITEMS:
   use <item>           - Use a consumable item
   use/feed <jig> <fish>  - Hand Cliff a fish to dress or improve a jig
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
+  inv sort fish         - Keep gear in place; sort fish by species, quality, size
   examine/ex <item/#>  - Look closely at something (or inventory #)
   equip/eq/wear/don [item] - Show equipment, or equip/wear an item
   wear all              - Wear clothing into empty slots

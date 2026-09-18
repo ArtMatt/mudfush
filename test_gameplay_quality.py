@@ -17,6 +17,7 @@ from items import (
     MUD_CARP,
     PLASTIC_WORM,
     SPECIALTY_LURE,
+    TROUT,
     ItemType,
     STORE_INVENTORY,
     create_item_copy,
@@ -261,6 +262,48 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertIn(population_shift_message(40, 55), POPULATION_RISE_MESSAGES)
         self.assertIn(population_shift_message(55, 40), POPULATION_FALL_MESSAGES)
         self.assertIsNone(population_shift_message(50, 50))
+
+    def test_inv_sort_fish_keeps_gear_and_orders_species_quality_size(self):
+        player = Player("angler")
+        worm = create_item_copy(PLASTIC_WORM, condition=9)
+        chum = create_item_copy(BUCKET_OF_CHUM)
+        trophy_bass = create_item_copy(BASS, roll_stats=False, condition=7)
+        trophy_bass.fish_size = "trophy"
+        small_bass = create_item_copy(BASS, roll_stats=False, condition=9)
+        small_bass.fish_size = "small"
+        new_avg_bass = create_item_copy(BASS, roll_stats=False, condition=9)
+        new_avg_bass.fish_size = "average"
+        trout = create_item_copy(TROUT, roll_stats=False, condition=6)
+        trout.fish_size = "large"
+        bluegill = create_item_copy(BLUEGILL, roll_stats=False, condition=8)
+        bluegill.fish_size = "tiny"
+        player.inventory = [
+            trophy_bass, worm, trout, chum, small_bass, bluegill, new_avg_bass
+        ]
+
+        result = self.commands.cmd_inventory(player, "sort fish")
+
+        self.assertIn("sort your fish", result.message)
+        carried = player.get_inventory_display_order()
+        self.assertEqual(
+            [item.id for item in carried],
+            [
+                "plastic_worm",
+                "bucket_of_chum",
+                "bluegill",
+                "bass",
+                "bass",
+                "bass",
+                "trout",
+            ],
+        )
+        bass = [item for item in carried if item.id == "bass"]
+        self.assertEqual(bass[0].condition, 9)
+        self.assertEqual(bass[0].fish_size, "average")
+        self.assertEqual(bass[1].condition, 9)
+        self.assertEqual(bass[1].fish_size, "small")
+        self.assertEqual(bass[2].condition, 7)
+        self.assertEqual(bass[2].fish_size, "trophy")
 
     def test_chum_is_not_wasted_at_a_teeming_spot(self):
         room = self.rooms["old_pier"]

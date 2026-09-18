@@ -983,6 +983,28 @@ CATCHABLE_FISH = [
     (LEGENDARY_CARP, 1),  # ~10× rarer than the old 1/100 base weight
 ]
 
+# Inventory fish sort: common species first, then better quality, then bigger size
+FISH_SPECIES_SORT_ORDER = {
+    fish.id: index for index, (fish, _) in enumerate(CATCHABLE_FISH)
+}
+FISH_SPECIES_SORT_ORDER["ancient_whiskers"] = len(CATCHABLE_FISH)
+
+FISH_SIZE_SORT_ORDER = {
+    "trophy": 0,
+    "large": 1,
+    "average": 2,
+    "small": 3,
+    "tiny": 4,
+}
+
+
+def fish_inventory_sort_key(item: Item) -> tuple:
+    """Species (catch table order), then quality high-to-low, then size big-to-small."""
+    species = FISH_SPECIES_SORT_ORDER.get(item.id, 999)
+    size_name = (item.fish_size or "").lower()
+    size = FISH_SIZE_SORT_ORDER.get(size_name, 5)
+    return (species, -item.condition, size, -float(item.weight or 0.0))
+
 # Items available in the store
 STORE_INVENTORY = {
     "basic_pole": (BASIC_POLE, 5),
