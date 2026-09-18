@@ -69,6 +69,13 @@ NPC_DESCRIPTIONS = {
         "never stop moving. He looks like he'd sell you your own boots "
         "and call it a bargain."
     ),
+    "cliff": (
+        "\nCLIFF\n"
+        "A quiet man in a paint-stained apron, visor pulled low. His hands "
+        "are nicked from years of wire and hooks. Jig bodies, skirts, and "
+        "tins of beads cover the bench. He looks up only when you set "
+        "something down."
+    ),
 }
 
 FISHING_SPOT_LANDMARKS = {
@@ -77,6 +84,31 @@ FISHING_SPOT_LANDMARKS = {
     "old_pier": "beside the old wooden boards",
     "rocky_point": "out by the flat rocks",
 }
+
+JIG_COMPONENTS = (
+    "bead",
+    "skirt",
+    "swivel",
+    "thread",
+    "spinner blade",
+    "split ring",
+    "trailer hook",
+    "chenille",
+    "feather",
+    "rattler",
+    "weed guard",
+    "paint flake",
+    "tinsel",
+    "keeper",
+    "eyelet",
+)
+
+CLIFF_COMPONENT_LINES = (
+    "I think this is what you're looking for.",
+    "This'll sit right on that jig.",
+    "Match the bait. That's the whole trick.",
+    "Here. Don't lose it in the grass.",
+)
 
 
 @dataclass
@@ -550,15 +582,15 @@ class GameCommands:
             return self.cmd_chum(player, item_name)
         if item.is_specialty_lure():
             return CommandResult(
-                "Sacrifice a fish to this jig: use <jig> <fish> "
-                "(or feed <fish>)."
+                "Hand Cliff a fish for this jig: use <jig> <fish> "
+                "(or give <fish> to cliff)."
             )
         if item.item_type == ItemType.FISH:
             lure = self._first_specialty_lure(player)
             if lure:
                 return self._feed_specialty_lure(player, lure, item)
             return CommandResult(
-                "You need a custom jig to sacrifice that fish into."
+                "You need a custom jig before Cliff can dress a fish for you."
             )
         return CommandResult(f"You can't find a use for {item.display_name} here.")
 
@@ -566,7 +598,7 @@ class GameCommands:
         """Sacrifice a fish to attune or strengthen a specialty lure."""
         if not args:
             return CommandResult(
-                "Feed what? Usage: feed <jig> <fish> (or feed <fish>)"
+                "Feed what? Usage: feed <jig> <fish> (or give <fish> to cliff)"
             )
         lure, fish = self._find_lure_and_fish(player, args)
         if lure and fish:
@@ -577,15 +609,15 @@ class GameCommands:
             if lure:
                 return self._feed_specialty_lure(player, lure, fish)
             return CommandResult(
-                "You need a custom jig to sacrifice that fish into."
+                "You need a custom jig before Cliff can dress a fish for you."
             )
         lure = self._find_typed_item(player, args, specialty_lure=True)
         if lure and lure.is_specialty_lure():
             return CommandResult(
-                "Sacrifice a fish to this jig: feed <jig> <fish>."
+                "Hand Cliff a fish for this jig: feed <jig> <fish>."
             )
         return CommandResult(
-            "Feed a fish into a custom jig: feed <jig> <fish>."
+            "Hand Cliff a fish for a custom jig: feed <jig> <fish>."
         )
 
     @staticmethod
@@ -655,35 +687,35 @@ class GameCommands:
     def _feed_specialty_lure(
         self, player: Player, lure: Item, fish: Item
     ) -> CommandResult:
-        """Lock or strengthen a specialty lure by sacrificing a fish."""
+        """Lock or strengthen a custom jig with Cliff's help."""
         if not lure.is_specialty_lure():
             return CommandResult(
-                "Only a blank jig from Bubba's kit can be attuned."
+                "Only a blank jig from Bubba's kit can be dressed here."
             )
         if player.current_room != "bubba_workshop":
             return CommandResult(
-                "Bubba keeps his vise, scent pans, and lure press in the "
-                "workshop west of the store porch. That's the only place "
-                "he'll let you work a custom jig."
+                "Cliff works jigs in the workshop west of the store porch. "
+                "That's where you hand him a fish."
             )
         if fish.item_type != ItemType.FISH:
-            return CommandResult("You can only sacrifice a fish to that lure.")
+            return CommandResult("Cliff only wants a fish.")
         if fish.id in LURE_FORBIDDEN_SPECIES:
             return CommandResult(
-                f"The {fish.plain_display_name} is too rare and wild to bottle "
-                "into a lure."
+                'Cliff backs up a step. "I don\'t put that one on a jig. '
+                'You keep it."'
             )
         if lure.attracts_fish_id and fish.id != lure.attracts_fish_id:
             species = self._fish_species_by_id(lure.attracts_fish_id)
             wanted = species.name if species else lure.attracts_fish_id
             return CommandResult(
-                f"This lure already hungers for {wanted}. "
-                "Only that species will strengthen it."
+                f'Cliff turns the {fish.plain_display_name} in his hand and '
+                f'shakes his head. "This jig\'s already a {wanted} pattern. '
+                'Bring me that, or start a new blank."'
             )
         if lure.species_attraction_multiplier() >= SPECIALTY_LURE_MAX_MULT:
             return CommandResult(
-                "The lure is already saturated with that scent. "
-                "You keep the fish."
+                'Cliff glances at the jig. "That one\'s wearing all it can. '
+                'You keep the fish."'
             )
 
         first_attune = lure.attracts_fish_id is None
@@ -695,30 +727,33 @@ class GameCommands:
         lure.name = attuned_lure_name(species)
         lure.description = attuned_lure_description(species)
         multiplier = lure.species_attraction_multiplier()
+        component = random.choice(JIG_COMPONENTS)
+        article = "an" if component[0].lower() in "aeiou" else "a"
+        quote = random.choice(CLIFF_COMPONENT_LINES)
         if first_attune:
-            return CommandResult(
-                message=(
-                    f"You clamp the blank jig in Bubba's bench vise and work "
-                    f"the {fish.plain_display_name} into the paint and belly. "
-                    f"The shed fills with the scent of {species.name}. "
-                    f"(Now {multiplier:.2f}× for that species.)"
-                ),
-                broadcast=(
-                    f"ROOM:{player.current_room}:{player.name} attunes a "
-                    "jig at Bubba's workbench."
-                ),
+            finish = (
+                f"You bind the {component} onto the blank jig. "
+                f"It settles into a {species.name} pattern. "
+                f"(Now {multiplier:.2f}× for that species.)"
+            )
+        else:
+            finish = (
+                f"You bind the {component} onto your {lure.plain_display_name}. "
+                f"The {species.name} pattern looks sharper. "
+                f"(Now {multiplier:.2f}×, {lure.lure_essence:.1f} typical "
+                f"{species.name}.)"
             )
         return CommandResult(
             message=(
-                f"You render the {fish.plain_display_name} down in Bubba's "
-                f"iron pan and steep the jig in the oil. The {species.name} "
-                f"scent grows stronger. "
-                f"(Now {multiplier:.2f}×, {lure.lure_essence:.1f} typical "
-                f"{species.name} sacrificed.)"
+                f"You hand Cliff the {fish.plain_display_name}.\n"
+                f"He turns it toward the window, then fishes {article} "
+                f"{component} out of a cluttered tin.\n"
+                f'Cliff says, "{quote}"\n'
+                f"{finish}"
             ),
             broadcast=(
-                f"ROOM:{player.current_room}:{player.name} feeds a fish "
-                "into a jig at the workbench."
+                f"ROOM:{player.current_room}:{player.name} hands Cliff a fish. "
+                f"Cliff passes back {article} {component}."
             ),
         )
 
@@ -922,14 +957,14 @@ class GameCommands:
                 )
                 lines.append(
                     f"Scent strength: {item.species_attraction_multiplier():.2f}× "
-                    f"({item.lure_essence:.1f} typical fish sacrificed, "
+                    f"({item.lure_essence:.1f} typical fish on the pattern, "
                     f"cap {SPECIALTY_LURE_MAX_MULT:.0f}×)"
                 )
             else:
                 lines.append(
-                    "Attuned to: nothing yet. In Bubba's workshop, use this "
-                    "jig with a fish to lock its species, then feed it more "
-                    "of the same. Size relative to that species matters, "
+                    "Attuned to: nothing yet. In Bubba's workshop, hand Cliff "
+                    "a fish with this jig. More of the same species will "
+                    "improve it. Size relative to that species matters, "
                     "not raw pounds. Equip with: wear jig."
                 )
         if item.item_type == ItemType.FISH:
@@ -1693,6 +1728,11 @@ class GameCommands:
         if name.lower() == "bubba":
             lines.append("Bubba nods back at you.")
             broadcasts.append(f"ROOM:{room.id}:Bubba nods back at {player.name}.")
+        elif name.lower() == "cliff":
+            lines.append("Cliff nods once, already looking back at the vise.")
+            broadcasts.append(
+                f"ROOM:{room.id}:Cliff nods once at {player.name}."
+            )
         elif name.lower() == "slick":
             lines.append("Slick furrows his brow and seems sweatier.")
             broadcasts.append(
@@ -1844,6 +1884,10 @@ class GameCommands:
                 )
             else:
                 lines.append('Bubba grins. "Mighty kind of you."')
+        elif name.lower() == "cliff":
+            lines.append(
+                'Cliff tucks the coins under a tin of beads. "It spends."'
+            )
         elif name.lower() == "slick":
             if amount >= 10 and self.market:
                 remaining = self._format_duration(
@@ -1907,6 +1951,14 @@ class GameCommands:
                 self.fishermen.in_room(player.current_room)
                 if self.fishermen else None
             )
+            if name.lower() == "cliff" and item.item_type == ItemType.FISH:
+                lure = self._first_specialty_lure(player)
+                if not lure:
+                    return CommandResult(
+                        'Cliff eyes the fish, then the empty space on your '
+                        'belt. "Bring a jig if you want that dressed."'
+                    )
+                return self._feed_specialty_lure(player, lure, item)
             if (
                 local_fisherman
                 and name.lower() == local_fisherman.display.lower()
@@ -2001,7 +2053,7 @@ ITEMS:
   get all               - Pick up everything on the ground
   drop <item>          - Drop an item
   use <item>           - Use a consumable item
-  use/feed <jig> <fish>  - Attune or strengthen a custom jig (Bubba's Workshop)
+  use/feed <jig> <fish>  - Hand Cliff a fish to dress or improve a jig
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
   examine/ex <item/#>  - Look closely at something (or inventory #)
   equip/eq/wear/don [item] - Show equipment, or equip/wear an item
@@ -2220,9 +2272,9 @@ TIPS:
             return CommandResult(
                 f"You buy a jig kit for {price} gold.\n"
                 f"Inside is a {new_item.display_name} (wear jig to equip). "
-                "Take it west of the porch to Bubba's workshop, then "
-                "sacrifice a fish to attune it. More of that species — "
-                "especially oversized ones — will strengthen it.\n"
+                "Take it west of the porch to Cliff in the workshop, then "
+                "hand him a fish. More of that species — especially "
+                "oversized ones — will improve the jig.\n"
                 f"You have {player.gold} gold remaining."
             )
         if store_type == StoreType.SLICK:

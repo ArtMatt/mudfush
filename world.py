@@ -49,22 +49,29 @@ class Room:
         if self.is_water and self.population is None:
             self.population = random.randint(20, 90)
 
-    def update_population(self):
-        """Change fish population while keeping it in the 0-100 range."""
-        if self.is_water:
-            # Chum attracts fish temporarily; remove its exact contribution
-            # before applying the lake's normal population movement.
-            current = max(0, (self.population or 0) - self.chum_bonus)
-            self.chum_bonus = 0
-            if current <= 0:
-                delta = random.randint(1, 25)
-            elif current >= 100:
-                delta = -random.randint(1, 25)
-            else:
-                delta = random.choice(
-                    list(range(-25, 0)) + list(range(1, 26))
-                )
-            self.population = max(0, min(100, current + delta))
+    def update_population(self) -> tuple[int, int]:
+        """
+        Change fish population while keeping it in the 0-100 range.
+        Returns (old_visible, new_visible) population. Non-water rooms
+        return (0, 0).
+        """
+        if not self.is_water:
+            return 0, 0
+        old = self.population or 0
+        # Chum attracts fish temporarily; remove its exact contribution
+        # before applying the lake's normal population movement.
+        current = max(0, old - self.chum_bonus)
+        self.chum_bonus = 0
+        if current <= 0:
+            delta = random.randint(1, 25)
+        elif current >= 100:
+            delta = -random.randint(1, 25)
+        else:
+            delta = random.choice(
+                list(range(-25, 0)) + list(range(1, 26))
+            )
+        self.population = max(0, min(100, current + delta))
+        return old, self.population
 
     def apply_chum(self, amount: int = 10) -> int:
         """Temporarily raise this fishing spot's population, returning gain."""
@@ -75,7 +82,7 @@ class Room:
         self.population = current + gain
         self.chum_bonus += gain
         return gain
-    
+
     def get_description(self, include_players: bool = True, current_player: str = None) -> str:
         """Get the full room description with items and exits."""
         lines = []
@@ -83,13 +90,13 @@ class Room:
         lines.append(f"  {self.name.upper()}")
         lines.append(f"{'='*50}")
         lines.append(f"\n{self.description}")
-        
+
         # Show items in room
         if self.items:
             lines.append("\nYou see here:")
             for item in self.items:
                 lines.append(f"  - {item.display_name}")
-        
+
         # Show NPCs and other players together
         if include_players:
             also_here = list(self.npcs)
@@ -98,18 +105,43 @@ class Room:
                 lines.append("\nAlso here:")
                 for name in also_here:
                     lines.append(f"  - {name}")
-        
+
         # Show exits
         if self.exits:
             exit_str = ", ".join(self.exits.keys())
             lines.append(f"\nExits: [{exit_str}]")
         else:
             lines.append("\nExits: [none]")
-        
+
         if self.is_water:
             lines.append("\n(You can \033[96mFISH\033[0m here)")
-        
+
         return "\n".join(lines)
+
+
+POPULATION_RISE_MESSAGES = (
+    "*A boil of baitfish breaks the surface.*",
+    "*Kingfishers start diving along the bank.*",
+    "*Dark shapes stitch the shallows.*",
+    "*A large fish breaks the surface in deeper water.*",
+)
+
+POPULATION_FALL_MESSAGES = (
+    "*A long shadow of fish slides out toward deeper water.*",
+    "*The surface calms.*",
+    "*A heron lifts off for other waters.*",
+    "*The crows grow quiet and drift inland.*",
+    "*A turtle slips off a log and the hole goes still.*",
+)
+
+
+def population_shift_message(old: int, new: int) -> Optional[str]:
+    """Room flavor when visible population rises or falls. None if unchanged."""
+    if new > old:
+        return random.choice(POPULATION_RISE_MESSAGES)
+    if new < old:
+        return random.choice(POPULATION_FALL_MESSAGES)
+    return None
 
 
 def _weighted_choice(options: List[Tuple[Item, int]]) -> Item:
@@ -196,11 +228,13 @@ An iron pan sits over a low burner, stained from years of rendering
 bait oil. The workbench is scarred and sticky, and the whole room
 smells like varnish, lake water, and fish.
 
-This is where Bubba lets customers attune custom jigs. Bring a
-blank jig and a fish: use or feed them here.""",
+This is where Cliff works custom jigs for Bubba. Bring a
+blank jig and a fish; Cliff will pick a component if the
+match is right.""",
         exits={"east": "store_porch"},
         items=[],
         is_water=False,
+        npcs=["Cliff"],
     )
     
     # Trail sections leading to the lake

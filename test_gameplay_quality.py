@@ -27,7 +27,7 @@ from market import Market, StoreType
 from mud_server import FishingMUD, MUDSession
 from player import Player, PlayerManager
 from weather import FORECAST_DEPTH, WeatherSystem
-from world import create_world
+from world import create_world, population_shift_message, POPULATION_RISE_MESSAGES, POPULATION_FALL_MESSAGES
 
 
 class GameplayQualityTests(unittest.TestCase):
@@ -257,6 +257,11 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(room.population, 45)
         self.assertEqual(room.chum_bonus, 0)
 
+    def test_population_shift_message_splits_rise_and_fall(self):
+        self.assertIn(population_shift_message(40, 55), POPULATION_RISE_MESSAGES)
+        self.assertIn(population_shift_message(55, 40), POPULATION_FALL_MESSAGES)
+        self.assertIsNone(population_shift_message(50, 50))
+
     def test_chum_is_not_wasted_at_a_teeming_spot(self):
         room = self.rooms["old_pier"]
         room.population = 100
@@ -314,13 +319,14 @@ class GameplayQualityTests(unittest.TestCase):
 
         first = self.commands.cmd_feed(player, "jig bass")
         self.assertIn("largemouth bass", first.message)
-        self.assertIn("bench vise", first.message)
+        self.assertIn("Cliff", first.message)
+        self.assertIn("You hand Cliff", first.message)
         self.assertEqual(lure.attracts_fish_id, "bass")
         self.assertAlmostEqual(lure.lure_essence, 1.33)
         self.assertFalse(any(item.id == "bass" for item in player.inventory))
 
         refused = self.commands.cmd_use(player, "jig bluegill")
-        self.assertIn("already hungers for largemouth bass", refused.message)
+        self.assertIn("already a largemouth bass pattern", refused.message)
         self.assertTrue(any(item.id == "bluegill" for item in player.inventory))
 
         more = create_item_copy(BASS, roll_stats=False, condition=9)
@@ -340,6 +346,19 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertIn("workshop west of the store porch", result.message)
         self.assertTrue(any(item.id == "bass" for item in player.inventory))
         self.assertIsNone(lure.attracts_fish_id)
+
+    def test_giving_a_fish_to_cliff_dresses_the_jig(self):
+        player = Player("angler", current_room="bubba_workshop")
+        lure = create_item_copy(SPECIALTY_LURE, condition=9)
+        bass = create_item_copy(BASS, roll_stats=False, condition=9)
+        bass.weight = 3.0
+        player.add_item(lure)
+        player.add_item(bass)
+        self.commands.player_manager.get_players_in_room.return_value = []
+        result = self.commands.cmd_give(player, "bass cliff")
+        self.assertIn("You hand Cliff", result.message)
+        self.assertEqual(lure.attracts_fish_id, "bass")
+        self.assertFalse(any(item.id == "bass" for item in player.inventory))
 
     def test_specialty_lure_scores_size_relative_to_the_species(self):
         average_bass = specialty_lure_essence_from_fish(BASS, BASS)
@@ -363,7 +382,7 @@ class GameplayQualityTests(unittest.TestCase):
         player.add_item(lure)
         player.add_item(legend)
         blocked = self.commands.cmd_feed(player, "jig whiskers")
-        self.assertIn("too rare and wild", blocked.message)
+        self.assertIn("don't put that one on a jig", blocked.message)
         self.assertTrue(any(item.id == "legendary_carp" for item in player.inventory))
 
         lure.attracts_fish_id = "bass"

@@ -16,7 +16,7 @@ import logging
 from typing import Dict, Optional, Set
 from pathlib import Path
 
-from world import create_world, Room, reset_ground_items
+from world import create_world, Room, reset_ground_items, population_shift_message
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
 from weather import WeatherSystem, WeatherType
@@ -146,7 +146,12 @@ class FishingMUD:
             while True:
                 await asyncio.sleep(interval)
                 for room in self.rooms.values():
-                    room.update_population()
+                    if not room.is_water:
+                        continue
+                    old_pop, new_pop = room.update_population()
+                    hint = population_shift_message(old_pop, new_pop)
+                    if hint:
+                        await self.broadcast_to_room(room.id, hint)
                 logger.info("Updated fish populations")
 
         self._population_task = asyncio.create_task(population_loop())

@@ -628,8 +628,8 @@ LURE_KIT = Item(
     name="jig kit",
     description=(
         "Bubba's expensive custom-jig kit. Buying it unpacks a blank "
-        "jig. Take it west of the porch to his workshop to attune it "
-        "with a sacrificed fish."
+        "jig. Take it west of the porch to Cliff in the workshop "
+        "and show him a fish."
     ),
     item_type=ItemType.MISC,
     value=1000,
@@ -640,10 +640,10 @@ SPECIALTY_LURE = Item(
     id="specialty_lure",
     name="blank jig",
     description=(
-        "An unfinished custom jig. In Bubba's workshop, sacrifice a fish "
-        "to lock it to that species, then feed it more of the same to "
-        "strengthen the scent. Bigger-than-average specimens help more; "
-        "raw heft does not. Equip it with: wear jig"
+        "An unfinished custom jig. In Bubba's workshop, hand Cliff a fish "
+        "and he'll pick a component for it. More of the same species "
+        "will improve it; bigger-than-average specimens help more. "
+        "Equip it with: wear jig"
     ),
     item_type=ItemType.LURE,
     value=1000,
@@ -689,7 +689,7 @@ def attuned_lure_name(species: Item) -> str:
 
 def attuned_lure_description(species: Item) -> str:
     return (
-        f"A custom jig steeped in {species.name} at Bubba's workbench. "
+        f"A custom jig Cliff dressed for {species.name}. "
         "Equip it while fishing to draw that species more often "
         "(wear jig)."
     )
