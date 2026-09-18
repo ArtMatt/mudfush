@@ -10,6 +10,8 @@ from commands import (
     GEM_CATCH_CHANCE,
     GameCommands,
     MOUTH_LURE_CATCH_CHANCE,
+    NORM_MAX_GUESSES,
+    NormRound,
     ReelChallenge,
 )
 from fishermen import FISHERMEN, FishermanManager, NPC_CATCH_MAX_SECONDS
@@ -36,7 +38,7 @@ from items import (
     specialty_lure_essence_from_fish,
 )
 from lake_state import LakeCycleState
-from market import Market, StoreType
+from market import BubbaFishQuest, Market, StoreType
 from mud_server import FishingMUD, MUDSession
 from player import Player, PlayerManager
 from weather import FORECAST_DEPTH, WeatherSystem
@@ -117,6 +119,21 @@ class GameplayQualityTests(unittest.TestCase):
                     StoreType.SLICK, item, charisma=20
                 )
                 self.assertLess(offer, buy)
+
+    def test_slick_refuses_to_buy_jigs(self):
+        player = Player("angler", current_room="slick_store")
+        jig = create_item_copy(SPECIALTY_LURE, roll_stats=False, condition=9)
+        player.add_item(jig)
+
+        listing = self.commands._format_sell_offer_list(player, StoreType.SLICK)
+        self.assertNotIn("jig", listing.lower())
+        self.assertIsNone(
+            self.market.estimate_sell_price(StoreType.SLICK, jig, charisma=20)
+        )
+
+        result = self.commands.cmd_sell(player, "jig")
+        self.assertIn("Cliff's work", result.message)
+        self.assertIn(jig, player.inventory)
 
     def test_bare_eq_shows_equipment(self):
         result = self.commands.cmd_equip(Player("angler"), "")
@@ -583,6 +600,94 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertIn("You hand Cliff", result.message)
         self.assertEqual(lure.attracts_fish_id, "bass")
         self.assertFalse(any(item.id == "bass" for item in player.inventory))
+
+    @staticmethod
+    def _norm_target():
+        return BubbaFishQuest(
+            fish_id="bass",
+            fish_name="largemouth bass",
+            fish_size="average",
+            condition=8,
+            target_weight=3.0,
+        )
+
+    def test_norm_stays_on_overgrown_path_and_starts_private_game(self):
+        self.assertIn("Norm", self.rooms["east_path"].npcs)
+        player = Player("angler", current_room="east_path")
+        self.commands.player_manager.get_players_in_room.return_value = []
+
+        with patch(
+            "commands.create_random_bubba_fish_quest",
+            return_value=self._norm_target(),
+        ):
+            greeting = self.commands.cmd_say(player, "hello Norm")
+            original = self.commands.norm_rounds["angler"]
+            repeated = self.commands.cmd_say(player, "hey Norm")
+
+        self.assertIn("I want to see a specific fish", greeting.message)
+        self.assertIn("same fish", repeated.message)
+        self.assertIs(self.commands.norm_rounds["angler"], original)
+
+    def test_norm_returns_nonfish_and_scores_three_hidden_traits(self):
+        player = Player("angler", current_room="east_path")
+        self.commands.player_manager.get_players_in_room.return_value = []
+        self.commands.norm_rounds["angler"] = NormRound(self._norm_target())
+
+        hat = create_item_copy(FISHING_HAT, condition=9)
+        player.add_item(hat)
+        not_fish = self.commands.cmd_give(player, "hat to Norm")
+        self.assertIn("that's not a fish", not_fish.message)
+        self.assertIn(hat, player.inventory)
+
+        none = create_item_copy(TROUT, roll_stats=False, condition=7)
+        none.fish_size = "large"
+        one = create_item_copy(BASS, roll_stats=False, condition=7)
+        one.fish_size = "large"
+        two = create_item_copy(BASS, roll_stats=False, condition=7)
+        two.fish_size = "average"
+
+        self.assertIn("No, not this", self.commands._give_to_norm(player, none).message)
+        self.assertIn("Kinda, but not quite", self.commands._give_to_norm(player, one).message)
+        self.assertIn("Oh, this is close", self.commands._give_to_norm(player, two).message)
+        self.assertEqual(self.commands.norm_rounds["angler"].guesses, 3)
+
+    def test_norm_exact_guess_returns_fish_rewards_jig_and_restarts(self):
+        player = Player("angler", current_room="east_path")
+        self.commands.player_manager.get_players_in_room.return_value = []
+        fish = create_item_copy(BASS, roll_stats=False, condition=8)
+        fish.fish_size = "average"
+        player.add_item(fish)
+        self.commands.norm_rounds["angler"] = NormRound(self._norm_target())
+
+        with patch(
+            "commands.create_random_bubba_fish_quest",
+            return_value=BubbaFishQuest(
+                "trout", "rainbow trout", "large", 9, 3.4
+            ),
+        ):
+            result = self.commands.cmd_give(player, "bass to Norm")
+
+        self.assertIn("that's what I was thinking of", result.message)
+        self.assertIn("I wanna play again", result.message)
+        self.assertIn(fish, player.inventory)
+        rewards = [item for item in player.inventory if item.id == "specialty_lure"]
+        self.assertEqual(len(rewards), 1)
+        self.assertIsNone(rewards[0].attracts_fish_id)
+        self.assertEqual(self.commands.norm_rounds["angler"].target.fish_id, "trout")
+        self.assertEqual(self.commands.norm_rounds["angler"].guesses, 0)
+
+    def test_norm_reveals_answer_after_eight_misses(self):
+        player = Player("angler", current_room="east_path")
+        state = NormRound(self._norm_target(), guesses=NORM_MAX_GUESSES - 1)
+        self.commands.norm_rounds["angler"] = state
+        wrong = create_item_copy(TROUT, roll_stats=False, condition=7)
+        wrong.fish_size = "large"
+
+        result = self.commands._give_to_norm(player, wrong)
+
+        self.assertIn("fine average largemouth bass", result.message)
+        self.assertIn("Say hello", result.message)
+        self.assertNotIn("angler", self.commands.norm_rounds)
 
     def test_specialty_lure_scores_size_relative_to_the_species(self):
         average_bass = specialty_lure_essence_from_fish(BASS, BASS)

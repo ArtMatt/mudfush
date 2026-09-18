@@ -15,7 +15,7 @@ from items import (
     colorize_condition, colorize_fish_size, UNSELLABLE_TYPES,
     BLUEGILL, BASS, CATFISH, TROUT, PIKE, LEGENDARY_CARP,
     MUD_CARP, PEBBLE_PERCH, MOON_DARTER, WALLEYE,
-    STING_PUFFER, ZEN_GUPPY, SPECIALTY_LURE,
+    STING_PUFFER, ZEN_GUPPY,
 )
 
 
@@ -97,6 +97,20 @@ class BubbaFishQuest:
         )
         size = colorize_fish_size(self.fish_size)
         return f"{quality} {size} {self.fish_name}"
+
+
+def create_random_bubba_fish_quest() -> BubbaFishQuest:
+    """Create a random fish target using Bubba's bounty rules."""
+    fish = random.choice(_BUBBA_QUEST_FISH)
+    size = random.choice(list(_FISH_SIZE_WEIGHT.keys()))
+    condition = random.choice([6, 7, 8, 9])
+    return BubbaFishQuest(
+        fish_id=fish.id,
+        fish_name=fish.name,
+        fish_size=size,
+        condition=condition,
+        target_weight=round(fish.weight * _FISH_SIZE_WEIGHT[size], 1),
+    )
 
 
 class Market:
@@ -197,14 +211,7 @@ class Market:
                 volatility=0.5  # 50% swings on fish!
             )
 
-        # Finished specialty lures are not sold, but Slick will lowball them.
-        self.prices[StoreType.SLICK.value][SPECIALTY_LURE.id] = PriceInfo(
-            base_price=SPECIALTY_LURE.value,
-            current_buy_price=0,
-            current_sell_price=int(SPECIALTY_LURE.value * 0.4),
-            trend=random.choice([-1, 0, 1]),
-            volatility=0.35,
-        )
+        # Specialty jigs stay with the angler — Slick will not fence them.
     
     def rotate_clothing_stock(self, announce: bool = True) -> Dict[str, int]:
         """
@@ -295,18 +302,7 @@ class Market:
         Requests a catchable species at a size/weight and quality (6-9).
         Only the first matching sale on this request gets double pay.
         """
-        fish = random.choice(_BUBBA_QUEST_FISH)
-        size = random.choice(list(_FISH_SIZE_WEIGHT.keys()))
-        # Caught fish roll condition 6-9 — only request fulfillable qualities
-        condition = random.choice([6, 7, 8, 9])
-        target_weight = round(fish.weight * _FISH_SIZE_WEIGHT[size], 1)
-        self.bubba_quest = BubbaFishQuest(
-            fish_id=fish.id,
-            fish_name=fish.name,
-            fish_size=size,
-            condition=condition,
-            target_weight=target_weight,
-        )
+        self.bubba_quest = create_random_bubba_fish_quest()
         self.bubba_quest_due_at = time.time() + self.BUBBA_QUEST_SECONDS
         self.bubba_post_quest_fish_sales = 0
         self._wake_quest_loop()
@@ -449,6 +445,8 @@ class Market:
         if item.item_type in UNSELLABLE_TYPES:
             return None
         if store == StoreType.BUBBA and item.item_type != ItemType.FISH:
+            return None
+        if store == StoreType.SLICK and item.is_specialty_lure():
             return None
 
         sell_price = self.get_sell_price(store, item.id)

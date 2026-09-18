@@ -20,7 +20,14 @@ from items import (
     SPECIALTY_LURE_MAX_MULT, attuned_lure_name, attuned_lure_description,
     specialty_lure_essence_from_fish,
 )
-from market import Market, StoreType, apply_condition_sell_price, apply_charisma_sell_bonus
+from market import (
+    BubbaFishQuest,
+    Market,
+    StoreType,
+    apply_condition_sell_price,
+    apply_charisma_sell_bonus,
+    create_random_bubba_fish_quest,
+)
 from lake_state import LakeCycleState
 from fishermen import Fisherman, FishermanManager, NPC_CATCH_MAX_SECONDS
 
@@ -77,6 +84,11 @@ NPC_DESCRIPTIONS = {
         "tins of beads cover the bench. He looks up only when you set "
         "something down."
     ),
+    "norm": (
+        "\nNORM\n"
+        "Cliff's young son is crouched in the grass, arranging pebbles and "
+        "fish-shaped sticks into a game only he understands."
+    ),
 }
 
 FISHING_SPOT_LANDMARKS = {
@@ -110,6 +122,14 @@ CLIFF_COMPONENT_LINES = (
     "Match the bait. That's the whole trick.",
     "Here. Don't lose it in the grass.",
 )
+
+NORM_MAX_GUESSES = 8
+
+
+@dataclass
+class NormRound:
+    target: BubbaFishQuest
+    guesses: int = 0
 
 
 @dataclass
@@ -156,6 +176,7 @@ class GameCommands:
         self.market = market
         self.lake_state = lake_state
         self.fishermen = fishermen
+        self.norm_rounds: Dict[str, NormRound] = {}
         
         # Command mapping
         self.commands: Dict[str, Callable] = {
@@ -1698,6 +1719,16 @@ class GameCommands:
         lines = [f'You say, "{message}"']
         broadcasts = [f'ROOM:{room.id}:{player.name} says, "{message}"']
 
+        greets_norm = (
+            any(npc.lower() == "norm" for npc in room.npcs)
+            and re.search(r"\b(?:hello|hi|hey)\b", message, re.IGNORECASE)
+            and re.search(r"\bnorm\b", message, re.IGNORECASE)
+        )
+        if greets_norm:
+            reply = self._start_or_resume_norm_round(player)
+            lines.append(f'Norm says, "{reply}"')
+            broadcasts.append(f'ROOM:{room.id}:Norm says, "{reply}"')
+
         if self.fishermen:
             local = self.fishermen.in_room(room.id)
             named = self.fishermen.named_in(message)
@@ -1723,6 +1754,81 @@ class GameCommands:
             message="\n".join(lines),
             broadcast="|".join(broadcasts),
         )
+
+    def _start_or_resume_norm_round(self, player: Player) -> str:
+        """Start Norm's private guessing round without resetting an active one."""
+        key = player.name.lower()
+        if key not in self.norm_rounds:
+            self.norm_rounds[key] = NormRound(
+                target=create_random_bubba_fish_quest()
+            )
+            return (
+                "Hello! I want to see a specific fish! "
+                "Can you guess what it is?!"
+            )
+        return "I'm still thinking of the same fish! Show me your guess!"
+
+    @staticmethod
+    def _norm_target_name(target: BubbaFishQuest) -> str:
+        quality = CONDITION_NAMES.get(target.condition, "decent")
+        return f"{quality} {target.fish_size} {target.fish_name}"
+
+    def _give_to_norm(self, player: Player, item: Item) -> CommandResult:
+        """Judge a fish against Norm's hidden species, size, and quality."""
+        if item.item_type != ItemType.FISH:
+            return CommandResult(
+                f'Norm hands back your {item.display_name}. '
+                '"Ha, that\'s not a fish!"'
+            )
+
+        key = player.name.lower()
+        round_state = self.norm_rounds.get(key)
+        if not round_state:
+            return CommandResult(
+                f"Norm hands back your {item.display_name}. "
+                '"Say hello first! Then I\'ll think of a fish."'
+            )
+
+        target = round_state.target
+        matches = sum((
+            item.id == target.fish_id,
+            (item.fish_size or "").lower() == target.fish_size,
+            item.condition == target.condition,
+        ))
+
+        if matches == 3:
+            reward = create_item_copy(SPECIALTY_LURE, roll_stats=False, condition=9)
+            player.add_item(reward)
+            self.norm_rounds[key] = NormRound(
+                target=create_random_bubba_fish_quest()
+            )
+            return CommandResult(
+                f"Norm looks over your {item.display_name}, then hands it back.\n"
+                '"Yay, that\'s what I was thinking of!"\n'
+                f"He gives you a {reward.display_name}.\n"
+                '"I wanna play again!"'
+            )
+
+        round_state.guesses += 1
+        reactions = {
+            0: "No, not this!",
+            1: "Kinda, but not quite.",
+            2: "Oh, this is close!",
+        }
+        lines = [
+            f"Norm looks over your {item.display_name}, then hands it back.",
+            f'"{reactions[matches]}"',
+        ]
+        remaining = NORM_MAX_GUESSES - round_state.guesses
+        if remaining <= 0:
+            answer = self._norm_target_name(target)
+            lines.append(f'"I was thinking of a {answer}!"')
+            lines.append('"Say hello if you want to play again!"')
+            self.norm_rounds.pop(key, None)
+        else:
+            noun = "guess" if remaining == 1 else "guesses"
+            lines.append(f"({remaining} {noun} left.)")
+        return CommandResult("\n".join(lines))
 
     def cmd_nod(self, player: Player, target: str) -> CommandResult:
         """Nod at a player or NPC in the room."""
@@ -1966,6 +2072,8 @@ class GameCommands:
             return CommandResult(f"You don't have a '{item_query}'.")
 
         if kind == "npc":
+            if name.lower() == "norm":
+                return self._give_to_norm(player, item)
             local_fisherman = (
                 self.fishermen.in_room(player.current_room)
                 if self.fishermen else None
@@ -2417,6 +2525,12 @@ TIPS:
             return CommandResult(
                 f'Bubba chuckles. "I ain\'t buying your {item.name}, partner."'
             )
+
+        if store_type == StoreType.SLICK and item.is_specialty_lure():
+            return CommandResult(
+                'Slick eyes the jig and shakes his head. '
+                '"I don\'t fence Cliff\'s work. Get it out of here."'
+            )
         
         # Determine what this store will buy
         if store_type == StoreType.BUBBA:
@@ -2539,6 +2653,8 @@ TIPS:
                 self.lake_state.payout(item.weight)
                 if self.lake_state else item.value
             )
+        if store_type == StoreType.SLICK and item.is_specialty_lure():
+            return None
 
         charisma = 1
         if player is not None:

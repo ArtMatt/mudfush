@@ -300,10 +300,12 @@ near the eastern shore.""",
         description="""A narrow, overgrown path winds eastward through thick brush before 
 bending south. Spider webs stretch between branches, and you have to 
 duck under low-hanging limbs. Few people seem to come this way. You 
-hear frogs croaking somewhere to the south.""",
+hear frogs croaking somewhere to the south. Norm, Cliff's young son,
+is playing beside the path.""",
         exits={"west": "trail_middle", "south": "shallow_cove"},
         items=[],
-        is_water=False
+        is_water=False,
+        npcs=["Norm"],
     )
     
     rooms["shallow_cove"] = Room(
