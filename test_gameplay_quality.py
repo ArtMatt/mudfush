@@ -63,6 +63,22 @@ class GameplayQualityTests(unittest.TestCase):
             player, fish.name
         ).message)
 
+    def test_failed_consider_does_not_broadcast_mutter(self):
+        player = Player("angler", current_room="old_pier")
+        player.attributes["intelligence"] = 1
+        player.attributes["wisdom"] = 1
+        self.rooms["old_pier"].population = 20
+
+        with patch("commands.random.randint", return_value=100):
+            failed = self.commands.cmd_consider(player, "")
+        self.assertIn("cannot judge", failed.message)
+        self.assertIsNone(failed.broadcast)
+
+        with patch("commands.random.randint", return_value=1):
+            succeeded = self.commands.cmd_consider(player, "")
+        self.assertIsNotNone(succeeded.broadcast)
+        self.assertIn("mumbles to themselves briefly", succeeded.broadcast)
+
     def test_slick_immediate_nonfish_buyback_always_loses_gold(self):
         for template, _ in STORE_INVENTORY.values():
             if template.item_type == ItemType.FISH:

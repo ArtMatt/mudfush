@@ -1594,8 +1594,7 @@ class GameCommands:
 
         if random.randint(1, 100) > success_chance:
             return CommandResult(
-                "You study the water, but cannot judge how many fish are present.",
-                broadcast=broadcast,
+                "You study the water, but cannot judge how many fish are present."
             )
 
         return CommandResult(
