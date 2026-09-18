@@ -70,6 +70,11 @@ INVENTORY_TYPE_FILTERS = {
     "misc": ItemType.MISC,
 }
 
+# Multi-type inventory filters (e.g. inv gear)
+INVENTORY_GROUP_FILTERS = {
+    "gear": frozenset({ItemType.FISHING_POLE, ItemType.LURE}),
+}
+
 INVENTORY_SLOT_FILTERS = {
     "head": WearSlot.HEAD,
     "hat": WearSlot.HEAD,
@@ -489,6 +494,9 @@ class Item:
         q = query.strip().lower()
         if not q:
             return True
+        group_match = INVENTORY_GROUP_FILTERS.get(q)
+        if group_match is not None:
+            return self.item_type in group_match
         type_match = INVENTORY_TYPE_FILTERS.get(q)
         if type_match is not None:
             return self.item_type == type_match

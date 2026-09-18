@@ -13,9 +13,12 @@ from items import (
     BASS,
     BLUEGILL,
     BUCKET_OF_CHUM,
+    FISHING_HAT,
     LEGENDARY_CARP,
     MUD_CARP,
+    NIGHTCRAWLERS,
     PLASTIC_WORM,
+    PRO_ROD,
     SPECIALTY_LURE,
     TROUT,
     ItemType,
@@ -194,6 +197,55 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertIn(gems[0].display_name, result.message)
         self.assertNotIn("gem", result.broadcast.lower())
 
+    def test_bubba_quest_timer_is_independent_of_clothing_restock(self):
+        quest = self.market.bubba_quest
+        due = self.market.bubba_quest_due_at
+        self.assertIsNotNone(quest)
+        self.assertGreater(self.market.seconds_until_bubba_quest(), 3500)
+
+        self.market.rotate_clothing_stock(announce=False)
+        self.assertIs(self.market.bubba_quest, quest)
+        self.assertEqual(self.market.bubba_quest_due_at, due)
+
+    def test_post_quest_fish_sales_shave_thirty_seconds_each(self):
+        player = Player("angler", current_room="store")
+        player.attributes["charisma"] = 1
+        bounty = create_item_copy(BLUEGILL, roll_stats=False, condition=8)
+        bounty.fish_size = "average"
+        bounty.weight = 0.5
+        extra = create_item_copy(BASS, roll_stats=False, condition=7)
+        extra.fish_size = "small"
+        player.add_item(bounty)
+        player.add_item(extra)
+
+        self.market.bubba_quest.fish_id = "bluegill"
+        self.market.bubba_quest.fish_name = "bluegill"
+        self.market.bubba_quest.fish_size = "average"
+        self.market.bubba_quest.condition = 8
+        self.market.bubba_quest.target_weight = 0.5
+        self.market.bubba_quest.claimed = False
+        self.market.bubba_quest_due_at = 1_000_000.0
+
+        with patch("market.time.time", return_value=100.0):
+            before = self.market.bubba_quest_due_at
+            self.assertFalse(self.market.apply_bubba_post_quest_fish_sale())
+            self.assertEqual(self.market.bubba_quest_due_at, before)
+
+            complete = self.commands.cmd_sell(player, "bluegill")
+            self.assertIn("That's the one", complete.message)
+            self.assertEqual(self.market.bubba_quest_due_at, before)
+
+            extra_sale = self.commands.cmd_sell(player, extra.name)
+            self.assertIn("next request coming sooner", extra_sale.message)
+            self.assertEqual(
+                self.market.bubba_quest_due_at,
+                before - Market.BUBBA_QUEST_FISH_SALE_REDUCTION,
+            )
+
+            self.market.bubba_quest_due_at = 110.0
+            self.assertTrue(self.market.apply_bubba_post_quest_fish_sale())
+            self.assertEqual(self.market.bubba_quest_due_at, 100.0)
+
     def test_bare_sell_greens_percent_hints_at_wisdom_12(self):
         player = Player("angler", current_room="store")
         player.attributes["wisdom"] = 8
@@ -304,6 +356,38 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(bass[1].fish_size, "small")
         self.assertEqual(bass[2].condition, 7)
         self.assertEqual(bass[2].fish_size, "trophy")
+
+    def test_inv_gear_lists_poles_and_lures_including_equipped(self):
+        player = Player("angler")
+        pole = create_item_copy(BASIC_POLE, condition=9)
+        spare = create_item_copy(PRO_ROD, condition=8)
+        worm = create_item_copy(PLASTIC_WORM, condition=9)
+        jig = create_item_copy(SPECIALTY_LURE, condition=7)
+        bait = create_item_copy(NIGHTCRAWLERS, condition=9)
+        hat = create_item_copy(FISHING_HAT, condition=9)
+        fish = create_item_copy(BLUEGILL, roll_stats=False, condition=8)
+        player.inventory = [pole, spare, worm, jig, bait, hat, fish]
+        player.equip(pole)
+        player.equip(hat)
+
+        result = self.commands.cmd_inventory(player, "gear")
+        text = result.message
+
+        self.assertIn("INVENTORY FILTER: 'gear'", text)
+        self.assertIn("basic fishing pole", text)
+        self.assertIn("professional fishing rod", text)
+        self.assertIn("plastic worm", text)
+        self.assertIn("blank jig", text)
+        self.assertNotIn("nightcrawler", text.lower())
+        self.assertNotIn("fishing hat", text)
+        self.assertNotIn("bluegill", text)
+
+        carried = player.get_inventory_display_order()
+        spare_number = next(
+            number for number, item in enumerate(carried, start=1)
+            if item.id == "pro_rod"
+        )
+        self.assertIn(f"{spare_number}) ", text)
 
     def test_chum_is_not_wasted_at_a_teeming_spot(self):
         room = self.rooms["old_pier"]

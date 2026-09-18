@@ -2063,6 +2063,7 @@ ITEMS:
   use <item>           - Use a consumable item
   use/feed <jig> <fish>  - Hand Cliff a fish to dress or improve a jig
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
+  inv gear              - Show all fishing poles and lures (equipped and carried)
   inv sort fish         - Keep gear in place; sort fish by species, quality, size
   examine/ex <item/#>  - Look closely at something (or inventory #)
   equip/eq/wear/don [item] - Show equipment, or equip/wear an item
@@ -2085,7 +2086,8 @@ SHOPPING (at Bubba's or Slick's):
   buy <item/#>        - Purchase an item (name or list number)
   sell                - See what you can sell and for how much
   sell <item/#>       - Sell a fish or item (name or inventory #)
-  (Bubba posts an hourly double-pay fish request — first to sell it wins!)
+  (Bubba posts a double-pay fish request — first to sell it wins!
+   After that, each extra fish sold to him brings the next request 30s sooner.)
 
 SOCIAL:
   say <message>         - Talk to others in the room
@@ -2464,16 +2466,30 @@ TIPS:
                 ),
             )
 
+        quest_nudge = ""
+        if (
+            store_type == StoreType.BUBBA
+            and item.item_type == ItemType.FISH
+            and self.market
+            and self.market.apply_bubba_post_quest_fish_sale()
+        ):
+            quest_nudge = (
+                "\nBubba already has what he wanted — "
+                "that sale gets the next request coming sooner."
+            )
+
         cha = player.get_effective_attribute("charisma")
         if item.item_type == ItemType.FISH and cha > 1:
             return CommandResult(
                 f"You sell your {item.display_name} for {sell_price} gold.\n"
-                f"Bubba tips his cap — your charm sweetened the deal.\n"
+                f"Bubba tips his cap — your charm sweetened the deal."
+                f"{quest_nudge}\n"
                 f"You now have {player.gold} gold."
             )
         
         return CommandResult(
-            f"You sell your {item.display_name} for {sell_price} gold.\n"
+            f"You sell your {item.display_name} for {sell_price} gold."
+            f"{quest_nudge}\n"
             f"You now have {player.gold} gold."
         )
 

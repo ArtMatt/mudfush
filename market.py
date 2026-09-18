@@ -24,7 +24,7 @@ class StoreType(Enum):
     SLICK = "slick"  # Shady, volatile prices
 
 
-# Fish Bubba may request on his hourly bounty (no legendaries)
+# Fish Bubba may request on his bounty (no legendaries)
 _BUBBA_QUEST_FISH = [
     BLUEGILL, PEBBLE_PERCH, BASS, MUD_CARP, WALLEYE, CATFISH, TROUT, PIKE,
     MOON_DARTER, STING_PUFFER, ZEN_GUPPY,
@@ -60,7 +60,7 @@ class StoreInventoryItem:
 
 @dataclass
 class BubbaFishQuest:
-    """Bubba's once-per-hour double-pay fish request."""
+    """Bubba's double-pay fish request."""
     fish_id: str
     fish_name: str
     fish_size: str
@@ -107,6 +107,8 @@ class Market:
     SLICK_CLOTHING_MIN = 2
     SLICK_CLOTHING_MAX = 4
     CLOTHING_ROTATION_SECONDS = 3600  # 1 hour
+    BUBBA_QUEST_SECONDS = 3600  # 1 hour, independent of clothing restock
+    BUBBA_QUEST_FISH_SALE_REDUCTION = 30  # seconds shaved per extra fish after bounty
     BUBBA_UNLIMITED_GEAR_IDS = frozenset({"basic_pole"})
     BUBBA_ONLY_IDS = frozenset({"bucket_of_chum", "lure_kit"})
     
@@ -128,8 +130,11 @@ class Market:
         self.last_update: float = time.time()
         self.last_clothing_rotation: float = time.time()
         self.bubba_quest: Optional[BubbaFishQuest] = None
+        self.bubba_quest_due_at: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._clothing_task: Optional[asyncio.Task] = None
+        self._quest_task: Optional[asyncio.Task] = None
+        self._quest_wakeup: Optional[asyncio.Event] = None
         self._broadcast_callback: Optional[Callable] = None
         self._restock_callback: Optional[Callable] = None
         
@@ -284,9 +289,9 @@ class Market:
 
     def rotate_bubba_quest(self, announce: bool = True) -> BubbaFishQuest:
         """
-        Pick a new hourly fish bounty for Bubba.
+        Pick a new fish bounty for Bubba.
         Requests a catchable species at a size/weight and quality (6-9).
-        Only the first matching sale that hour gets double pay.
+        Only the first matching sale on this request gets double pay.
         """
         fish = random.choice(_BUBBA_QUEST_FISH)
         size = random.choice(list(_FISH_SIZE_WEIGHT.keys()))
@@ -300,6 +305,8 @@ class Market:
             condition=condition,
             target_weight=target_weight,
         )
+        self.bubba_quest_due_at = time.time() + self.BUBBA_QUEST_SECONDS
+        self._wake_quest_loop()
         return self.bubba_quest
 
     def get_bubba_quest(self) -> Optional[BubbaFishQuest]:
@@ -322,6 +329,30 @@ class Market:
         quest.claimed_by = player_name
         return True
 
+    def seconds_until_bubba_quest(self) -> float:
+        """Seconds remaining until Bubba posts a new request."""
+        return max(0.0, self.bubba_quest_due_at - time.time())
+
+    def apply_bubba_post_quest_fish_sale(self) -> bool:
+        """
+        After the current bounty is claimed, each extra fish sold to Bubba
+        shortens the wait until the next request by 30 seconds.
+        The completing sale itself does not count.
+        """
+        quest = self.bubba_quest
+        if not quest or not quest.claimed:
+            return False
+        self.bubba_quest_due_at = max(
+            time.time(),
+            self.bubba_quest_due_at - self.BUBBA_QUEST_FISH_SALE_REDUCTION,
+        )
+        self._wake_quest_loop()
+        return True
+
+    def _wake_quest_loop(self) -> None:
+        if self._quest_wakeup is not None:
+            self._quest_wakeup.set()
+
     def get_bubba_quest_status_lines(self) -> List[str]:
         """Status lines for list/sell/examine UI."""
         quest = self.bubba_quest
@@ -331,8 +362,8 @@ class Market:
         if quest.claimed:
             who = quest.claimed_by or "someone"
             return [
-                f'Bubba already got his {target} from {who} this hour.',
-                "Next request when clothing rotates.",
+                f"Bubba already got his {target} from {who}.",
+                "Keep selling him fish — each one brings the next request sooner.",
             ]
         return [
             f'Bubba says, "{quest.offer_phrase()}."',
@@ -532,20 +563,40 @@ class Market:
             while True:
                 await asyncio.sleep(self.CLOTHING_ROTATION_SECONDS)
                 counts = self.rotate_clothing_stock()
-                quest = self.rotate_bubba_quest()
                 if self._broadcast_callback:
                     bubba_count = counts.get(StoreType.BUBBA.value, 0)
                     msg = (
                         "\n*** Clothing Restock: Bubba's has new apparel! "
-                        f"({bubba_count} items) ***\n"
-                        f'*** Bubba hollers, "{quest.offer_phrase()}!" ***'
+                        f"({bubba_count} items) ***"
                     )
                     await self._broadcast_callback(msg)
                 if self._restock_callback:
                     await self._restock_callback()
+
+        async def quest_loop():
+            self._quest_wakeup = asyncio.Event()
+            while True:
+                remaining = self.seconds_until_bubba_quest()
+                if remaining <= 0:
+                    self._quest_wakeup.clear()
+                    quest = self.rotate_bubba_quest()
+                    if self._broadcast_callback:
+                        await self._broadcast_callback(
+                            f'\n*** Bubba hollers, "{quest.offer_phrase()}!" ***'
+                        )
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        self._quest_wakeup.wait(),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                self._quest_wakeup.clear()
         
         self._task = asyncio.create_task(market_loop())
         self._clothing_task = asyncio.create_task(clothing_loop())
+        self._quest_task = asyncio.create_task(quest_loop())
     
     def stop(self):
         """Stop the market loops."""
@@ -555,6 +606,10 @@ class Market:
         if self._clothing_task:
             self._clothing_task.cancel()
             self._clothing_task = None
+        if self._quest_task:
+            self._quest_task.cancel()
+            self._quest_task = None
+        self._quest_wakeup = None
     
     def get_for_sale_items(
         self, store: StoreType, player_name: Optional[str] = None
