@@ -39,7 +39,7 @@ from items import (
 )
 from lake_state import LakeCycleState
 from market import BubbaFishQuest, Market, StoreType
-from mud_server import FishingMUD, MUDSession
+from mud_server import FishingMUD, MUDSession, handle_client
 from player import Player, PlayerManager
 from weather import FORECAST_DEPTH, WeatherSystem
 from world import create_world, population_shift_message, POPULATION_RISE_MESSAGES, POPULATION_FALL_MESSAGES
@@ -533,9 +533,10 @@ class GameplayQualityTests(unittest.TestCase):
     def test_lure_kit_is_bubba_only_and_unpacks_a_blank_lure(self):
         self.assertTrue(self.market.is_item_for_sale(StoreType.BUBBA, "lure_kit"))
         self.assertFalse(self.market.is_item_for_sale(StoreType.SLICK, "lure_kit"))
+        self.assertEqual(self.market.get_buy_price(StoreType.BUBBA, "lure_kit"), 5000)
 
         player = Player("angler", current_room="store")
-        player.gold = 1000
+        player.gold = 5000
         result = self.commands.cmd_buy(player, "jig kit")
         self.assertIn("blank jig", result.message)
         lures = [item for item in player.inventory if item.id == "specialty_lure"]
@@ -544,7 +545,7 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(player.gold, 0)
         self.assertIn("You attach the", player.equip(lures[0]))
 
-        player.gold = 1000
+        player.gold = 5000
         sold_out = self.commands.cmd_buy(player, "kit")
         self.assertIn("only had one", sold_out.message)
 
@@ -1190,6 +1191,59 @@ class FishermanBroadcastTests(unittest.IsolatedAsyncioTestCase):
                 "Rangy Fisherman catches a 1.2 lb bluegill!",
             ],
         )
+
+
+class LoginSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_abandoned_character_creation_does_not_raise(self):
+        session = MUDSession.__new__(MUDSession)
+        session.game = Mock()
+        session.process = Mock()
+        session.process.stdout = Mock()
+        session.process.stdout.drain = AsyncMock()
+        session.player = None
+        session.running = True
+        session.command_history = []
+        session.history_index = 0
+        session._slick_deal_task = None
+        session.send_message = AsyncMock()
+        session.cleanup = AsyncMock()
+
+        async def abandon(prompt="", hidden=False):
+            raise EOFError()
+
+        session.get_input = abandon
+        await session.run()
+        session.cleanup.assert_awaited()
+
+    async def test_ctrl_c_during_login_does_not_raise(self):
+        session = MUDSession.__new__(MUDSession)
+        session.game = Mock()
+        session.process = Mock()
+        session.player = None
+        session.running = True
+        session.command_history = []
+        session.history_index = 0
+        session._slick_deal_task = None
+        session.send_message = AsyncMock()
+        session.cleanup = AsyncMock()
+
+        async def interrupt(prompt="", hidden=False):
+            raise KeyboardInterrupt()
+
+        session.get_input = interrupt
+        await session.run()
+        session.cleanup.assert_awaited()
+
+    async def test_handle_client_swallows_login_interrupt(self):
+        process = Mock()
+        process.channel = Mock()
+        process.exit = Mock()
+        with patch("mud_server.MUDSession") as session_cls:
+            inst = Mock()
+            inst.run = AsyncMock(side_effect=KeyboardInterrupt())
+            session_cls.return_value = inst
+            await handle_client(process, Mock())
+        process.exit.assert_called_once_with(0)
 
 
 if __name__ == "__main__":

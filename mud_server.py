@@ -921,6 +921,7 @@ class MUDSession:
             except asyncio.TimeoutError:
                 await self.send_message("\nConnection timed out due to inactivity.\n")
                 raise EOFError()
+        raise EOFError()
     
     async def run(self):
         """Main session loop."""
@@ -1199,6 +1200,15 @@ class MUDSession:
                 except Exception as e:
                     logger.error(f"Error in session loop: {e}")
                     await self.send_message(f"\nError: {e}\n")
+
+        except (EOFError, ConnectionResetError, BrokenPipeError, OSError):
+            # Dropped connection during login/character creation or later.
+            pass
+        except KeyboardInterrupt:
+            # Ctrl-C in a client session must not stop the whole server.
+            pass
+        except Exception as e:
+            logger.exception("Session error: %s", e)
         
         finally:
             await self.cleanup()
@@ -1546,10 +1556,15 @@ async def handle_client(process: asyncssh.SSHServerProcess, game: FishingMUD):
     
     try:
         await session.run()
+    except (EOFError, KeyboardInterrupt, ConnectionResetError, BrokenPipeError, OSError):
+        logger.info("Client left before finishing login")
     except Exception as e:
-        logger.error(f"Session error: {e}")
+        logger.exception("Session error: %s", e)
     finally:
-        process.exit(0)
+        try:
+            process.exit(0)
+        except Exception:
+            pass
 
 
 async def run_admin_console(game: FishingMUD):

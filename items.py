@@ -640,7 +640,7 @@ LURE_KIT = Item(
         "and show him a fish."
     ),
     item_type=ItemType.MISC,
-    value=1000,
+    value=5000,
     condition=9,
 )
 
