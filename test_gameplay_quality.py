@@ -36,6 +36,7 @@ from items import (
     create_item_copy,
     create_mouth_hooked_golden_lure,
     specialty_lure_essence_from_fish,
+    specialty_lure_multiplier,
 )
 from lake_state import LakeCycleState
 from market import BubbaFishQuest, Market, StoreType
@@ -576,7 +577,7 @@ class GameplayQualityTests(unittest.TestCase):
         player.add_item(more)
         boosted = self.commands.cmd_feed(player, "bass")
         self.assertAlmostEqual(lure.lure_essence, 2.66)
-        self.assertIn("2.33×", boosted.message)
+        self.assertIn("2.67×", boosted.message)
 
     def test_specialty_lure_work_requires_bubba_workshop(self):
         player = Player("angler", current_room="old_pier")
@@ -716,7 +717,7 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertTrue(any(item.id == "legendary_carp" for item in player.inventory))
 
         lure.attracts_fish_id = "bass"
-        lure.lure_essence = 8.0
+        lure.lure_essence = 4.0
         lure.name = "largemouth bass jig"
         player.equipped_lure = lure
         plain = dict(
@@ -731,6 +732,20 @@ class GameplayQualityTests(unittest.TestCase):
         )
         self.assertEqual(boosted["bass"], int(plain["bass"] * 3))
         self.assertEqual(boosted["bluegill"], plain["bluegill"])
+
+    def test_specialty_lure_quadratic_curve_caps_at_10x(self):
+        self.assertEqual(specialty_lure_multiplier(0), 2.0)
+        self.assertEqual(specialty_lure_multiplier(4), 3.0)
+        self.assertEqual(specialty_lure_multiplier(12), 4.0)
+        self.assertEqual(specialty_lure_multiplier(24), 5.0)
+        self.assertEqual(specialty_lure_multiplier(40), 6.0)
+        self.assertEqual(specialty_lure_multiplier(60), 7.0)
+        self.assertEqual(specialty_lure_multiplier(84), 8.0)
+        self.assertEqual(specialty_lure_multiplier(112), 9.0)
+        self.assertEqual(specialty_lure_multiplier(144), 10.0)
+        self.assertEqual(specialty_lure_multiplier(200), 10.0)
+        self.assertEqual(specialty_lure_multiplier(8), 3.5)
+        self.assertEqual(specialty_lure_multiplier(32), 5.5)
 
 
 class ReelEventTests(unittest.IsolatedAsyncioTestCase):

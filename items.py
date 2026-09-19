@@ -661,8 +661,9 @@ SPECIALTY_LURE = Item(
 # Species that cannot be bottled into a specialty lure
 LURE_FORBIDDEN_SPECIES = frozenset({"legendary_carp", "ancient_whiskers"})
 SPECIALTY_LURE_BASE_MULT = 2.0
-SPECIALTY_LURE_ESSENCE_PER_MULT = 8.0
-SPECIALTY_LURE_MAX_MULT = 5.0
+SPECIALTY_LURE_MAX_MULT = 10.0
+# Average-fish essence for the first +1× (2→3). Later steps cost 8, 12, 16, ...
+SPECIALTY_LURE_STEP_ESSENCE = 4.0
 
 
 def specialty_lure_essence_from_fish(fish: Item, species: Optional[Item] = None) -> float:
@@ -680,15 +681,21 @@ def specialty_lure_essence_from_fish(fish: Item, species: Optional[Item] = None)
 
 
 def specialty_lure_multiplier(essence: float) -> float:
-    """2× at first attunement, up to 5× as typical-fish equivalents accumulate."""
-    bonus = max(0.0, float(essence)) / SPECIALTY_LURE_ESSENCE_PER_MULT
-    return round(
-        min(
-            SPECIALTY_LURE_MAX_MULT,
-            SPECIALTY_LURE_BASE_MULT + bonus,
-        ),
-        2,
-    )
+    """
+    2× at first attunement, then +1× at triangular cost 4, 8, 12, ... average
+    fish, up to 10× (144 typical-fish essence).
+    """
+    remaining = max(0.0, float(essence))
+    mult = SPECIALTY_LURE_BASE_MULT
+    step = 1
+    while mult < SPECIALTY_LURE_MAX_MULT:
+        cost = SPECIALTY_LURE_STEP_ESSENCE * step
+        if remaining < cost:
+            return round(mult + remaining / cost, 2)
+        remaining -= cost
+        mult += 1.0
+        step += 1
+    return float(SPECIALTY_LURE_MAX_MULT)
 
 
 def attuned_lure_name(species: Item) -> str:
