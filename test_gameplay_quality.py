@@ -54,6 +54,22 @@ class GameplayQualityTests(unittest.TestCase):
             self.rooms, Mock(), weather=None, market=self.market
         )
 
+    def test_meditate_shows_named_knacks_and_stays_off_help(self):
+        player = Player("angler")
+        player.attributes["strength"] = 3
+        player.attributes["wisdom"] = 12
+        med = self.commands.cmd_meditate(player, "")
+        self.assertIn("Patience", med.message)
+        self.assertIn("Rapport", med.message)
+        self.assertIn("CHARISMA", med.message.upper())
+        help_text = self.commands.cmd_help(player, "").message.lower()
+        self.assertNotIn("meditate", help_text)
+        self.assertNotIn(" med ", help_text)
+        self.assertEqual(
+            self.commands.parse_and_execute(player, "med").message,
+            med.message,
+        )
+
     def test_appraisal_gate_and_specific_is_more_accurate(self):
         player = Player("angler")
         fish = create_item_copy(BLUEGILL, roll_stats=False, condition=9)

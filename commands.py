@@ -218,6 +218,8 @@ class GameCommands:
             "stats": self.cmd_stats,
             "stat": self.cmd_stats,
             "attributes": self.cmd_stats,
+            "meditate": self.cmd_meditate,
+            "med": self.cmd_meditate,
             "fish": self.cmd_fish,
             "cast": self.cmd_fish,
             "repair": self.cmd_repair,
@@ -1030,6 +1032,71 @@ class GameCommands:
         """Show character attributes."""
         return CommandResult(player.get_attributes_display())
 
+    def cmd_meditate(self, player: Player, args: str) -> CommandResult:
+        """Secret: sit with your attributes and named knacks."""
+        s = player.get_effective_attribute("strength")
+        d = player.get_effective_attribute("dexterity")
+        c = player.get_effective_attribute("constitution")
+        i = player.get_effective_attribute("intelligence")
+        w = player.get_effective_attribute("wisdom")
+        h = player.get_effective_attribute("charisma")
+        bite = (s - 1) * 0.8 + (d - 1) * 0.8
+        reel = (s - 1) * 0.8 + (c - 1) * 0.8
+        reflex = max(2, d + 2)
+        mental = 2 * i + w
+        surge = min(75.0, max(0.0, 1.25 * (mental - 3)))
+        care = max(15, int(round(100 - (i - 1) * 7 - (w - 1) * 3.5)))
+        hardiness = Player.clothing_wear_chance(c)
+        mending = max(5, 60 - 3 * ((i - 1) + (d - 1)))
+        reading = 3 * (max(0, i - 1) + max(0, w - 1))
+        forecast = min(5, (i + w) // 4)
+        if h < 6:
+            rapport = "stay or leave"
+        elif h < 9:
+            rapport = "a landmark"
+        elif h < 12:
+            rapport = "the water's mood"
+        else:
+            rapport = "the exact spot"
+        if w <= 2:
+            insight = "polite guesses"
+        elif w <= 4:
+            insight = "the market's lean"
+        elif w < 8:
+            insight = "price arrows"
+        elif w < 12:
+            insight = "percent vs usual"
+        else:
+            insight = "percent vs usual, in green"
+        appraise = (
+            "a tight look at a fish"
+            if i + w >= 4
+            else "too cloudy to price a catch"
+        )
+        lines = [
+            "You sit still and take stock of yourself.",
+            player.get_attributes_display(),
+            "",
+            "  Patience     "
+            + (f"{bite:.1f}s off the wait" if bite else "no hurry yet"),
+            "  Fight        "
+            + (f"{reel:.1f}s off the reel" if reel else "a long pull"),
+            f"  Reflex       {reflex:.0f}s to answer a run",
+            f"  Surge        {surge:.0f}% chance of a lucky pull",
+            f"  Care         {care}% chance tackle scuffs this cast",
+            f"  Hardiness    {hardiness}% chance worn clothes scuff",
+            f"  Mending      {mending:.0f}s with a toolkit",
+            f"  Reading      +{reading}% to consider the water",
+            f"  Appraisal    {appraise}",
+            f"  Forecast     {forecast} weather step"
+            + ("s" if forecast != 1 else ""),
+            f"  Insight      {insight}",
+            f"  Charm        +{(h - 1) * 5}% selling fish to Bubba",
+            f"  Hustle       +{(h - 1) * 0.5:.1f}% at Slick's",
+            f"  Rapport      fishermen offer {rapport}",
+        ]
+        return CommandResult("\n".join(lines))
+
     def cmd_drink(self, player: Player, args: str) -> CommandResult:
         """Secret: drink an unopened beer to permanently improve an attribute."""
         if player.beer_awaiting_attr or player.beer_confirm_attr:
@@ -1300,8 +1367,8 @@ class GameCommands:
         intelligence = player.get_effective_attribute("intelligence")
         wisdom = player.get_effective_attribute("wisdom")
 
-        # Bite wait: 2x old (100-pop)/12.5, reduced by Str and Dex
-        base_bite = round(2 * (100 - population) / 12.5)
+        # Bite wait: 2x old (100-pop)/10, reduced by Str and Dex
+        base_bite = round(2 * (100 - population) / 10)
         bite_reduction = (strength - 1) * 0.8 + (dexterity - 1) * 0.8
         if base_bite <= 0:
             bite_seconds = 0.0
