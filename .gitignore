@@ -14,6 +14,10 @@ ssh_host_key.pub
 # Player save data
 saves/
 
+# Local-only tests (kept on disk, not published)
+test_*.py
+tests/
+
 # Editor / OS junk
 .DS_Store
 *.swp
