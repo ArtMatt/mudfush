@@ -39,6 +39,7 @@ CEELO_TURN_SECONDS = 15
 CEELO_IDLE_LIMIT = 3
 CEELO_MIN_ANTE = 10
 CEELO_MAX_PLAYERS = 3  # Curt plus up to three players
+CEELO_JUNK_EXTRA_SECONDS = 3
 
 
 @dataclass
@@ -52,6 +53,7 @@ class CeeloRound:
     rolled_players: Set[str] = field(default_factory=set)
     turn_order: List[str] = field(default_factory=list)
     turn_index: int = 0
+    turn_deadline: float = 0.0
 
 
 class ReelAborted(Exception):
@@ -106,22 +108,38 @@ class FishingMUD:
             logger.info(f"Found {len(saved_players)} saved player(s)")
 
     @staticmethod
+    def _ceelo_read_dice(
+        dice: Tuple[int, int, int]
+    ) -> Tuple[Tuple[int, int, int], Optional[Tuple[int, int]], Optional[str]]:
+        """Score one toss. Junk dice return no score."""
+        dice = tuple(sorted(dice))
+        if dice == (4, 5, 6):
+            return dice, (4, 0), "4-5-6 — automatic win"
+        if dice == (1, 2, 3):
+            return dice, (1, 0), "1-2-3 — automatic loss"
+        if dice[0] == dice[2]:
+            return dice, (3, dice[0]), f"triple {dice[0]}s"
+        if dice[0] == dice[1]:
+            return dice, (2, dice[2]), f"{dice[2]} point"
+        if dice[1] == dice[2]:
+            return dice, (2, dice[0]), f"{dice[0]} point"
+        return dice, None, None
+
+    @staticmethod
+    def _ceelo_throw_once(
+    ) -> Tuple[Tuple[int, int, int], Optional[Tuple[int, int]], Optional[str]]:
+        dice = tuple(sorted(random.randint(1, 6) for _ in range(3)))
+        return FishingMUD._ceelo_read_dice(dice)
+
+    @staticmethod
     def _ceelo_throw() -> Tuple[Tuple[int, int, int], Tuple[int, int], str, int]:
-        """Roll until Cee-lo produces 4-5-6, 1-2-3, triples, or a point."""
+        """Keep tossing until Curt has 4-5-6, 1-2-3, triples, or a point."""
         tosses = 0
         while True:
             tosses += 1
-            dice = tuple(sorted(random.randint(1, 6) for _ in range(3)))
-            if dice == (4, 5, 6):
-                return dice, (4, 0), "4-5-6 — automatic win", tosses
-            if dice == (1, 2, 3):
-                return dice, (1, 0), "1-2-3 — automatic loss", tosses
-            if dice[0] == dice[2]:
-                return dice, (3, dice[0]), f"triple {dice[0]}s", tosses
-            if dice[0] == dice[1]:
-                return dice, (2, dice[2]), f"{dice[2]} point", tosses
-            if dice[1] == dice[2]:
-                return dice, (2, dice[0]), f"{dice[0]} point", tosses
+            dice, score, label = FishingMUD._ceelo_throw_once()
+            if score is not None:
+                return dice, score, label, tosses
 
     @staticmethod
     def _ceelo_roll_text(
@@ -161,6 +179,21 @@ class FishingMUD:
             current = CeeloRound(self._ceelo_round_id, ante)
             self.ceelo_round = current
             current.participants.append(player.name)
+            others = [
+                occupant
+                for occupant in self.rooms[CEELO_ROOM_ID].players
+                if occupant.lower() != player.name.lower()
+            ]
+            if not others:
+                start = self._start_ceelo_hand(current) or "Curt waits."
+                return CommandResult(
+                    f"You slide Curt {ante} gold. Nobody else is here, so "
+                    f"he matches it and rolls.\n{start}",
+                    broadcast=(
+                        f"ROOM:{CEELO_ROOM_ID}:{player.name} antes {ante} gold.\n"
+                        f"{start}"
+                    ),
+                )
             self._ceelo_join_task = asyncio.create_task(
                 self._open_ceelo_table(current.round_id)
             )
@@ -181,12 +214,8 @@ class FishingMUD:
             ),
         )
 
-    async def _open_ceelo_table(self, round_id: int) -> None:
-        await asyncio.sleep(CEELO_JOIN_SECONDS)
-        current = self.ceelo_round
-        if not current or current.round_id != round_id or current.phase != "joining":
-            return
-
+    def _start_ceelo_hand(self, current: CeeloRound) -> Optional[str]:
+        """Seat whoever is still in the room and have Curt roll first."""
         seated = []
         for name in current.participants:
             player = self.player_manager.find_online_player(name)
@@ -197,20 +226,29 @@ class FishingMUD:
         current.participants = seated
         if not seated:
             self.ceelo_round = None
-            return
+            return None
 
         current.phase = "rolling"
         dice, score, label, tosses = self._ceelo_throw()
         current.curt_score = score
         current.turn_order = list(seated)
         current.turn_index = 0
-        await self.broadcast_to_room(
-            CEELO_ROOM_ID,
+        announcement = (
             self._ceelo_roll_text("Curt", dice, label, tosses)
             + f"\n{current.turn_order[0]}, type ROLL. "
-            f"(You have {CEELO_TURN_SECONDS} seconds.)",
+            f"(You have {CEELO_TURN_SECONDS} seconds.)"
         )
         self._schedule_ceelo_turn_timeout(current)
+        return announcement
+
+    async def _open_ceelo_table(self, round_id: int) -> None:
+        await asyncio.sleep(CEELO_JOIN_SECONDS)
+        current = self.ceelo_round
+        if not current or current.round_id != round_id or current.phase != "joining":
+            return
+        announcement = self._start_ceelo_hand(current)
+        if announcement:
+            await self.broadcast_to_room(CEELO_ROOM_ID, announcement)
 
     def roll_ceelo(self, player: Player) -> CommandResult:
         """Resolve the current player's Cee-lo throw."""
@@ -234,11 +272,19 @@ class FishingMUD:
                 f"Wait for {expected or 'Curt'} to finish their turn."
             )
 
+        dice, score, label = self._ceelo_throw_once()
+        if score is None:
+            current.turn_deadline += CEELO_JUNK_EXTRA_SECONDS
+            text = f"{player.name} rolls {dice[0]} {dice[1]} {dice[2]}."
+            return CommandResult(
+                text,
+                broadcast=f"ROOM:{CEELO_ROOM_ID}:{text}",
+            )
+
         self._cancel_ceelo_turn_timeout()
-        dice, score, label, tosses = self._ceelo_throw()
         current.scores[player.name] = score
         current.rolled_players.add(player.name)
-        text = self._ceelo_roll_text(player.name, dice, label, tosses)
+        text = self._ceelo_roll_text(player.name, dice, label, 1)
         self._advance_ceelo_turn(current)
         next_name = self._current_ceelo_player(current)
         if next_name:
@@ -268,6 +314,7 @@ class FishingMUD:
         expected = self._current_ceelo_player(current)
         if not expected:
             return
+        current.turn_deadline = monotonic() + CEELO_TURN_SECONDS
         self._ceelo_turn_task = asyncio.create_task(
             self._ceelo_turn_timeout(current.round_id, expected)
         )
@@ -278,7 +325,18 @@ class FishingMUD:
         self._ceelo_turn_task = None
 
     async def _ceelo_turn_timeout(self, round_id: int, expected: str) -> None:
-        await asyncio.sleep(CEELO_TURN_SECONDS)
+        while True:
+            current = self.ceelo_round
+            if (
+                not current
+                or current.round_id != round_id
+                or self._current_ceelo_player(current) != expected
+            ):
+                return
+            remaining = current.turn_deadline - monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
         current = self.ceelo_round
         if (
             not current

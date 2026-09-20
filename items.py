@@ -188,6 +188,33 @@ def colorize_fish_size(size: Optional[str]) -> str:
     quality = FISH_SIZE_QUALITY.get(size.lower(), 5)
     return colorize_condition(quality, size)
 
+
+# One ANSI color per species. Mud carp uses 33, the same olive-brown
+# band as disheveled / ruined-through-worn on most SSH palettes.
+FISH_SPECIES_COLORS = {
+    "pebble_perch": "\033[90m",      # gray
+    "bluegill": "\033[34m",          # blue
+    "bass": "\033[32m",              # green
+    "mud_carp": "\033[33m",          # yellow/brown (disheveled)
+    "walleye": "\033[93m",           # bright yellow
+    "catfish": "\033[37m",           # white
+    "trout": "\033[95m",             # bright magenta
+    "pike": "\033[92m",              # bright green
+    "moon_darter": "\033[96m",       # bright cyan
+    "sting_puffer": "\033[91m",      # bright red
+    "zen_guppy": "\033[35m",         # magenta
+    "legendary_carp": "\033[94m",    # bright blue
+    "ancient_whiskers": "\033[97m",  # bright white
+}
+
+
+def colorize_fish_species(fish_id: str, name: str) -> str:
+    """Color a species name for terminal display."""
+    color = FISH_SPECIES_COLORS.get(fish_id)
+    if not color:
+        return name
+    return f"{color}{name}{_ANSI_RESET}"
+
 ATTRIBUTES = (
     "strength",
     "dexterity",
@@ -481,7 +508,10 @@ class Item:
             size = f"{colorize_fish_size(self.fish_size)} "
         else:
             size = ""
-        base = f"{self.colored_condition_name} {size}{self.name}"
+        species = self.name
+        if self.item_type == ItemType.FISH:
+            species = colorize_fish_species(self.id, self.name)
+        base = f"{self.colored_condition_name} {size}{species}"
         return f"{base}{self._modifier_suffix(colored=True)}"
 
     def matches(self, query: str) -> bool:

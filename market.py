@@ -12,7 +12,8 @@ from enum import Enum
 
 from items import (
     Item, ItemType, STORE_INVENTORY, WEARABLE_ITEMS, CONDITION_NAMES,
-    colorize_condition, colorize_fish_size, UNSELLABLE_TYPES,
+    colorize_condition, colorize_fish_size, colorize_fish_species,
+    UNSELLABLE_TYPES,
     BLUEGILL, BASS, CATFISH, TROUT, PIKE, LEGENDARY_CARP,
     MUD_CARP, PEBBLE_PERCH, MOON_DARTER, WALLEYE,
     STING_PUFFER, ZEN_GUPPY,
@@ -96,7 +97,8 @@ class BubbaFishQuest:
             CONDITION_NAMES.get(self.condition, "decent"),
         )
         size = colorize_fish_size(self.fish_size)
-        return f"{quality} {size} {self.fish_name}"
+        species = colorize_fish_species(self.fish_id, self.fish_name)
+        return f"{quality} {size} {species}"
 
 
 def _random_fish_quest(pool: List) -> BubbaFishQuest:
