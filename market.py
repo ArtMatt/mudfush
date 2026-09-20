@@ -99,9 +99,8 @@ class BubbaFishQuest:
         return f"{quality} {size} {self.fish_name}"
 
 
-def create_random_bubba_fish_quest() -> BubbaFishQuest:
-    """Create a random fish target using Bubba's bounty rules."""
-    fish = random.choice(_BUBBA_QUEST_FISH)
+def _random_fish_quest(pool: List) -> BubbaFishQuest:
+    fish = random.choice(pool)
     size = random.choice(list(_FISH_SIZE_WEIGHT.keys()))
     condition = random.choice([6, 7, 8, 9])
     return BubbaFishQuest(
@@ -111,6 +110,20 @@ def create_random_bubba_fish_quest() -> BubbaFishQuest:
         condition=condition,
         target_weight=round(fish.weight * _FISH_SIZE_WEIGHT[size], 1),
     )
+
+
+def create_random_bubba_fish_quest() -> BubbaFishQuest:
+    """Create a random fish target using Bubba's bounty rules."""
+    return _random_fish_quest(_BUBBA_QUEST_FISH)
+
+
+# Norm will not think of a sting puffer; showing one is never a guess.
+_NORM_QUEST_FISH = [fish for fish in _BUBBA_QUEST_FISH if fish.id != "sting_puffer"]
+
+
+def create_random_norm_fish_quest() -> BubbaFishQuest:
+    """Create Norm's hidden fish: same rules as Bubba, never a sting puffer."""
+    return _random_fish_quest(_NORM_QUEST_FISH)
 
 
 class Market:

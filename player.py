@@ -82,6 +82,8 @@ class Player:
     level: int = 1
     pending_level_ups: int = 0  # Unspent permanent attribute improvements
     total_gold_earned: int = 0  # Lifetime earnings
+    slick_gold_spent: int = 0  # Lifetime gold spent buying from Slick
+    ceelo_access_unlocked: bool = False  # Permanent access to Slick's back room
     play_time_seconds: int = 0  # Total play time
     last_sing_time: float = 0.0  # Unix timestamp of last sing for Bubba
     slick_ban_until: float = 0.0  # Unix timestamp when Slick's ban expires
@@ -95,6 +97,8 @@ class Player:
     slick_visit_id: int = 0
     slick_deal_offered: bool = False
     slick_deal_pending: bool = False
+    # Runtime-only: Curt can bar an idle spectator for the current Slick visit
+    ceelo_kicked_visit_id: int = -1
     # Runtime-only beer drink confirmation (not saved)
     beer_awaiting_attr: bool = False
     beer_confirm_attr: Optional[str] = None
@@ -278,6 +282,8 @@ class Player:
             "level": self.level,
             "pending_level_ups": self.pending_level_ups,
             "total_gold_earned": self.total_gold_earned,
+            "slick_gold_spent": self.slick_gold_spent,
+            "ceelo_access_unlocked": self.ceelo_access_unlocked,
             "play_time_seconds": self.play_time_seconds,
             "last_sing_time": self.last_sing_time,
             "slick_ban_until": self.slick_ban_until,
@@ -345,6 +351,8 @@ class Player:
             level=int(data.get("level", 1)),
             pending_level_ups=int(data.get("pending_level_ups", 0)),
             total_gold_earned=data.get("total_gold_earned", 0),
+            slick_gold_spent=int(data.get("slick_gold_spent", 0)),
+            ceelo_access_unlocked=bool(data.get("ceelo_access_unlocked", False)),
             play_time_seconds=data.get("play_time_seconds", 0),
             last_sing_time=data.get("last_sing_time", 0.0),
             slick_ban_until=data.get("slick_ban_until", 0.0),

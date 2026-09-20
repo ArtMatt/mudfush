@@ -14,7 +14,9 @@ from items import (
 
 
 # Rooms that never get random ground loot
-NO_GROUND_LOOT_ROOMS = frozenset({"store", "slick_store", "jail", "bubba_workshop"})
+NO_GROUND_LOOT_ROOMS = frozenset({
+    "store", "slick_store", "slick_backroom", "jail", "bubba_workshop",
+})
 
 # Common ground finds (item template, relative weight)
 COMMON_GROUND_LOOT: List[Tuple[Item, int]] = [
@@ -403,6 +405,22 @@ Type 'buy <item>' to purchase, 'sell <item>' to sell.""",
         items=[],
         is_water=False,
         npcs=["Slick"],
+    )
+
+    rooms["slick_backroom"] = Room(
+        id="slick_backroom",
+        name="Slick's Back Room",
+        description="""A low-ceilinged room hides behind the Employees Only door.
+A scarred card table sits beneath a bare bulb, its green felt burned and
+stained. Three dice wait beside a chipped cup. Curt leans back in his chair,
+watching the doorway as if he has been expecting you.
+
+Tip Curt some gold to ante into a game of Cee-lo. Once the table is ready,
+wait for your name and type 'roll'.""",
+        exits={"east": "slick_store"},
+        items=[],
+        is_water=False,
+        npcs=["Curt"],
     )
 
     rooms["jail"] = Room(

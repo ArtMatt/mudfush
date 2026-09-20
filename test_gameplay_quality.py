@@ -30,17 +30,25 @@ from items import (
     PLASTIC_WORM,
     PRO_ROD,
     SPECIALTY_LURE,
+    STING_PUFFER,
     TROUT,
     ItemType,
     STORE_INVENTORY,
+    colorize_condition,
     create_item_copy,
     create_mouth_hooked_golden_lure,
     specialty_lure_essence_from_fish,
     specialty_lure_multiplier,
 )
 from lake_state import LakeCycleState
-from market import BubbaFishQuest, Market, StoreType
-from mud_server import FishingMUD, MUDSession, handle_client
+from market import BubbaFishQuest, Market, StoreType, create_random_norm_fish_quest
+from mud_server import (
+    CEELO_IDLE_LIMIT,
+    CeeloRound,
+    FishingMUD,
+    MUDSession,
+    handle_client,
+)
 from player import Player, PlayerManager
 from weather import FORECAST_DEPTH, WeatherSystem
 from world import create_world, population_shift_message, POPULATION_RISE_MESSAGES, POPULATION_FALL_MESSAGES
@@ -230,7 +238,8 @@ class GameplayQualityTests(unittest.TestCase):
             message, extra = result.deferred()
 
         self.assertIn(
-            "You notice this fish had a lure already hooked in its mouth. "
+            "You notice this fish had a "
+            f"{colorize_condition(2, 'lure')} already hooked in its mouth. "
             "You carefully remove it.",
             message,
         )
@@ -304,6 +313,12 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertNotRegex(listing.lower(), r"gem")
         status = "\n".join(self.market.get_bubba_quest_status_lines())
         self.assertNotRegex(status.lower(), r"gem")
+
+        self.commands.player_manager.get_players_in_room.return_value = []
+        nod = self.commands.cmd_nod(player, "bubba")
+        self.assertIn("Bubba nods back", nod.message)
+        self.assertIn("I'll pay double for a", nod.message)
+        self.assertIn("bluegill", nod.message)
 
         result = self.commands.cmd_sell(player, "bluegill")
         gems = [item for item in player.inventory if item.item_type == ItemType.GEM]
@@ -488,6 +503,40 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(bass[2].condition, 7)
         self.assertEqual(bass[2].fish_size, "trophy")
 
+    def test_bare_repair_lists_worn_and_carried_repairable_gear(self):
+        player = Player("angler")
+        pole = create_item_copy(BASIC_POLE, condition=4)
+        spare = create_item_copy(PRO_ROD, condition=8)
+        new_lure = create_item_copy(PLASTIC_WORM, condition=9)
+        hat = create_item_copy(FISHING_HAT, condition=3)
+        fish = create_item_copy(BLUEGILL, roll_stats=False, condition=5)
+        player.inventory = [pole, spare, new_lure, hat, fish]
+        player.equip(pole)
+        player.equip(hat)
+
+        result = self.commands.cmd_repair(player, "")
+        text = result.message
+
+        self.assertIn("REPAIRABLE ITEMS", text)
+        self.assertIn("fishing hat", text)
+        self.assertIn("basic fishing pole", text)
+        self.assertIn("professional fishing rod", text)
+        self.assertNotIn("plastic worm", text)
+        self.assertNotIn("bluegill", text)
+        carried = player.get_inventory_display_order()
+        spare_number = next(
+            number for number, item in enumerate(carried, start=1)
+            if item.id == "pro_rod"
+        )
+        self.assertIn(f"{spare_number}) ", text)
+
+        player.unequip("head")
+        player.unequip("pole")
+        for item in list(player.inventory):
+            item.condition = 9
+        empty = self.commands.cmd_repair(player, "")
+        self.assertEqual(empty.message, "Nothing you carry needs repairing.")
+
     def test_inv_gear_lists_poles_and_lures_including_equipped(self):
         player = Player("angler")
         pole = create_item_copy(BASIC_POLE, condition=9)
@@ -531,6 +580,50 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(room.population, 100)
         self.assertTrue(any(item.id == "bucket_of_chum" for item in player.inventory))
         self.assertIn("keep the chum sealed", result.message)
+
+    def test_ceelo_door_is_hidden_until_permanently_unlocked(self):
+        player = Player("angler", current_room="slick_store")
+        self.rooms["slick_store"].players.add(player.name)
+
+        hidden = self.commands.cmd_look(player, "").message
+        self.assertNotIn("EMPLOYEES ONLY", hidden)
+        self.assertNotIn("north, west", hidden)
+        self.assertIn("can't go west", self.commands.cmd_go(player, "west").message)
+
+        player.attributes["charisma"] = 8
+        revealed = self.commands.cmd_look(player, "").message
+        self.assertTrue(player.ceelo_access_unlocked)
+        self.assertIn("EMPLOYEES ONLY", revealed)
+        moved = self.commands.cmd_go(player, "west")
+        self.assertEqual(player.current_room, "slick_backroom")
+        self.assertIn("SLICK'S BACK ROOM", moved.message)
+        self.assertIn("Curt", moved.message)
+
+        restored = Player.from_dict(player.to_dict())
+        self.assertTrue(restored.ceelo_access_unlocked)
+
+    def test_spending_five_hundred_at_slick_permanently_unlocks_backroom(self):
+        player = Player("angler", current_room="slick_store")
+        player.slick_gold_spent = 490
+        invitation = self.commands._record_slick_spend(player, 10)
+
+        self.assertEqual(player.slick_gold_spent, 500)
+        self.assertTrue(player.ceelo_access_unlocked)
+        self.assertIn("Want to see if you can get some more", invitation)
+        restored = Player.from_dict(player.to_dict())
+        self.assertEqual(restored.slick_gold_spent, 500)
+        self.assertTrue(restored.ceelo_access_unlocked)
+
+    def test_roll_away_from_ceelo_is_an_eye_roll_social(self):
+        player = Player("angler", current_room="store")
+        result = self.commands.cmd_roll(player, "")
+        self.assertEqual(result.message, "You roll your eyes.")
+        self.assertEqual(
+            result.broadcast,
+            "ROOM:store:angler rolls their eyes.",
+        )
+        help_text = self.commands.cmd_help(player, "").message.lower()
+        self.assertNotIn("roll", help_text)
 
     def test_chum_is_bubba_only_and_limited_until_restock(self):
         self.assertTrue(
@@ -635,7 +728,7 @@ class GameplayQualityTests(unittest.TestCase):
         self.commands.player_manager.get_players_in_room.return_value = []
 
         with patch(
-            "commands.create_random_bubba_fish_quest",
+            "commands.create_random_norm_fish_quest",
             return_value=self._norm_target(),
         ):
             greeting = self.commands.cmd_say(player, "hello Norm")
@@ -678,7 +771,7 @@ class GameplayQualityTests(unittest.TestCase):
         self.commands.norm_rounds["angler"] = NormRound(self._norm_target())
 
         with patch(
-            "commands.create_random_bubba_fish_quest",
+            "commands.create_random_norm_fish_quest",
             return_value=BubbaFishQuest(
                 "trout", "rainbow trout", "large", 9, 3.4
             ),
@@ -706,6 +799,27 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertIn("fine average largemouth bass", result.message)
         self.assertIn("Say hello", result.message)
         self.assertNotIn("angler", self.commands.norm_rounds)
+
+    def test_norm_refuses_sting_puffer_without_using_a_guess(self):
+        player = Player("angler", current_room="east_path")
+        self.commands.norm_rounds["angler"] = NormRound(self._norm_target())
+        puffer = create_item_copy(STING_PUFFER, roll_stats=False, condition=9)
+        puffer.fish_size = "average"
+        player.add_item(puffer)
+
+        result = self.commands._give_to_norm(player, puffer)
+
+        self.assertIn("WHOA!! That looks dangerous", result.message)
+        self.assertIn("wasn't thinking of that", result.message)
+        self.assertNotIn("guess", result.message.lower())
+        self.assertEqual(self.commands.norm_rounds["angler"].guesses, 0)
+        self.assertEqual(self.commands.norm_rounds["angler"].target.fish_id, "bass")
+        self.assertIn(puffer, player.inventory)
+
+    def test_norm_never_thinks_of_a_sting_puffer(self):
+        for _ in range(200):
+            quest = create_random_norm_fish_quest()
+            self.assertNotEqual(quest.fish_id, "sting_puffer")
 
     def test_specialty_lure_scores_size_relative_to_the_species(self):
         average_bass = specialty_lure_essence_from_fish(BASS, BASS)
@@ -764,6 +878,102 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(specialty_lure_multiplier(32), 5.5)
 
 
+class CeeloGameTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.game = FishingMUD()
+        self.game.broadcast_to_room = AsyncMock()
+        self.alice = Player("Alice", current_room="slick_backroom", gold=100)
+        self.bob = Player("Bob", current_room="slick_backroom", gold=100)
+        self.game.player_manager.players = {
+            self.alice.name: self.alice,
+            self.bob.name: self.bob,
+        }
+        self.game.rooms["slick_backroom"].players.update({"Alice", "Bob"})
+
+    def tearDown(self):
+        if self.game._ceelo_join_task:
+            self.game._ceelo_join_task.cancel()
+        self.game._cancel_ceelo_turn_timeout()
+
+    async def test_matching_tips_join_one_table_and_curt_rolls_first(self):
+        first = self.game.join_ceelo(self.alice, 10)
+        joined = self.game.join_ceelo(self.bob, 10)
+        wrong = Player("Wrong", current_room="slick_backroom", gold=100)
+        too_small = self.game.join_ceelo(wrong, 5)
+        mismatch = self.game.join_ceelo(wrong, 20)
+
+        self.assertIn("15 seconds", first.message)
+        self.assertIn("take a place", joined.message)
+        self.assertIn("Minimum ante is 10 gold", too_small.message)
+        self.assertIn("Ante is 10 gold", mismatch.message)
+        self.assertEqual(self.alice.gold, 90)
+        self.assertEqual(self.bob.gold, 90)
+        round_id = self.game.ceelo_round.round_id
+        self.game._ceelo_join_task.cancel()
+
+        with (
+            patch("mud_server.asyncio.sleep", new=AsyncMock()),
+            patch.object(
+                self.game,
+                "_ceelo_throw",
+                return_value=((2, 2, 4), (2, 4), "4 point", 1),
+            ),
+        ):
+            await self.game._open_ceelo_table(round_id)
+
+        current = self.game.ceelo_round
+        self.assertEqual(current.curt_score, (2, 4))
+        self.assertEqual(current.turn_order, ["Alice", "Bob"])
+        broadcast = self.game.broadcast_to_room.await_args.args[1]
+        self.assertIn("Curt rolls", broadcast)
+        self.assertIn("Alice, type ROLL", broadcast)
+
+    async def test_players_roll_in_order_and_highest_takes_house_matched_pot(self):
+        current = CeeloRound(
+            round_id=1,
+            ante=10,
+            participants=["Alice", "Bob"],
+            phase="rolling",
+            curt_score=(2, 3),
+            turn_order=["Alice", "Bob"],
+        )
+        self.game.ceelo_round = current
+        throws = iter([
+            ((2, 2, 4), (2, 4), "4 point", 1),
+            ((5, 5, 6), (2, 6), "6 point", 1),
+        ])
+        with patch.object(self.game, "_ceelo_throw", side_effect=lambda: next(throws)):
+            alice = self.game.roll_ceelo(self.alice)
+            bob = self.game.roll_ceelo(self.bob)
+
+        self.assertIn("Alice rolls", alice.message)
+        self.assertIn("Bob, type ROLL", alice.message)
+        self.assertIn("Bob wins the 30-gold pot", bob.message)
+        self.assertEqual(self.bob.gold, 130)
+        self.assertIsNone(self.game.ceelo_round)
+
+    async def test_three_skipped_hands_eject_spectator_for_current_visit(self):
+        self.bob.slick_visit_id = 7
+        self.bob.ceelo_access_unlocked = True
+        for round_id in range(1, CEELO_IDLE_LIMIT + 1):
+            current = CeeloRound(
+                round_id=round_id,
+                ante=10,
+                participants=["Alice"],
+                phase="rolling",
+                curt_score=(2, 6),
+                rolled_players={"Alice"},
+            )
+            self.game.ceelo_round = current
+            result = self.game._finish_ceelo_round(current, "Curt wins.")
+
+        self.assertIn("watched three hands", result)
+        self.assertEqual(self.bob.current_room, "slick_store")
+        self.assertEqual(self.bob.ceelo_kicked_visit_id, 7)
+        blocked = self.game.commands.cmd_go(self.bob, "west")
+        self.assertIn("done spectating this visit", blocked.message)
+
+
 class ReelEventTests(unittest.IsolatedAsyncioTestCase):
     def test_helpful_reel_chance_is_halved_but_still_caps_at_75(self):
         chance = MUDSession._helpful_reel_chance
@@ -811,7 +1021,7 @@ class ReelEventTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_choice(seq):
             seq = tuple(seq)
-            if seq == ("reel", "pull", "slack", "yank"):
+            if "reel" in seq and "pump" in seq:
                 return "reel"
             return "left"
 

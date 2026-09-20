@@ -129,11 +129,25 @@ CONDITION_NAMES = {
 # ANSI colors for condition quality in terminal/SSH clients
 _ANSI_RESET = "\033[0m"
 _CONDITION_COLORS = {
-    "red": "\033[31m",      # broken (0)
-    "yellow": "\033[33m",   # above broken through 50% (1-4)
-    "green": "\033[32m",    # above 50% to just below new (5-8)
-    "teal": "\033[36m",     # new (9)
+    "red": "\033[31m",             # broken (0)
+    "yellow": "\033[33m",          # ruined through worn (1-4)
+    "bright_yellow": "\033[93m",   # bog-standard and decent (5-6)
+    "green": "\033[32m",           # nice (7)
+    "bright_green": "\033[92m",    # fine (8)
+    "teal": "\033[36m",            # new (9)
 }
+_CONDITION_LEVEL_COLOR = (
+    "red",            # 0 broken
+    "yellow",         # 1 ruined
+    "yellow",         # 2 battered
+    "yellow",         # 3 disheveled
+    "yellow",         # 4 worn
+    "bright_yellow",  # 5 bog-standard
+    "bright_yellow",  # 6 decent
+    "green",          # 7 nice
+    "bright_green",   # 8 fine
+    "teal",           # 9 new
+)
 _ANSI_ESCAPE_RE = re.compile(r"\033\[[0-9;]*m")
 
 
@@ -145,20 +159,15 @@ def strip_ansi(text: str) -> str:
 def colorize_condition(condition: int, label: str) -> str:
     """
     Color a condition label by quality:
-      0 broken           -> red
-      1-4 (up to 50%)    -> yellow
-      5-8 (below new)    -> green
-      9 new              -> teal
+      0 broken              -> red
+      1-4 ruined to worn    -> yellow
+      5-6 bog-standard/decent -> bright yellow
+      7 nice                -> green
+      8 fine                -> bright green
+      9 new                 -> teal
     """
     level = max(0, min(9, condition))
-    if level <= 0:
-        color = _CONDITION_COLORS["red"]
-    elif level <= 4:
-        color = _CONDITION_COLORS["yellow"]
-    elif level <= 8:
-        color = _CONDITION_COLORS["green"]
-    else:
-        color = _CONDITION_COLORS["teal"]
+    color = _CONDITION_COLORS[_CONDITION_LEVEL_COLOR[level]]
     return f"{color}{label}{_ANSI_RESET}"
 
 
@@ -166,7 +175,7 @@ def colorize_condition(condition: int, label: str) -> str:
 FISH_SIZE_QUALITY = {
     "tiny": 0,      # red
     "small": 2,     # yellow
-    "average": 5,   # green
+    "average": 5,   # bright yellow
     "large": 7,     # green
     "trophy": 9,    # teal
 }

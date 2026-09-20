@@ -26,7 +26,7 @@ from market import (
     StoreType,
     apply_condition_sell_price,
     apply_charisma_sell_bonus,
-    create_random_bubba_fish_quest,
+    create_random_norm_fish_quest,
 )
 from lake_state import LakeCycleState
 from fishermen import Fisherman, FishermanManager, NPC_CATCH_MAX_SECONDS
@@ -89,6 +89,11 @@ NPC_DESCRIPTIONS = {
         "Cliff's young son is crouched in the grass, arranging pebbles and "
         "fish-shaped sticks into a game only he understands."
     ),
+    "curt": (
+        "\nCURT\n"
+        "A broad, quiet man in rolled shirtsleeves sits behind a scarred "
+        "green table. He rolls three dice across his knuckles without looking."
+    ),
 }
 
 FISHING_SPOT_LANDMARKS = {
@@ -124,6 +129,9 @@ CLIFF_COMPONENT_LINES = (
 )
 
 NORM_MAX_GUESSES = 8
+CEELO_ROOM_ID = "slick_backroom"
+CEELO_ACCESS_CHARISMA = 8
+CEELO_SPEND_UNLOCK = 500
 
 
 @dataclass
@@ -177,6 +185,8 @@ class GameCommands:
         self.lake_state = lake_state
         self.fishermen = fishermen
         self.norm_rounds: Dict[str, NormRound] = {}
+        self.ceelo_tip_handler: Optional[Callable[[Player, int], CommandResult]] = None
+        self.ceelo_roll_handler: Optional[Callable[[Player], CommandResult]] = None
         
         # Command mapping
         self.commands: Dict[str, Callable] = {
@@ -233,6 +243,7 @@ class GameCommands:
             "say": self.cmd_say,
             "nod": self.cmd_nod,
             "tip": self.cmd_tip,
+            "roll": self.cmd_roll,
             "give": self.cmd_give,
             "shout": self.cmd_shout,
             "yell": self.cmd_shout,
@@ -307,6 +318,7 @@ class GameCommands:
                 f'{SLICK_WORM_DEAL_COST} gold."'
             )
         player.gold -= SLICK_WORM_DEAL_COST
+        unlock = self._record_slick_spend(player, SLICK_WORM_DEAL_COST)
         worms = []
         for _ in range(SLICK_WORM_DEAL_COUNT):
             worm = create_item_copy(PLASTIC_WORM, condition=9)
@@ -318,11 +330,24 @@ class GameCommands:
                 f'Slick grins wide and bags up three worms. "Smart choice."\n'
                 f"You pay {SLICK_WORM_DEAL_COST} gold and receive: {names}.\n"
                 f"You now have {player.gold} gold."
+                f"{unlock}"
             ),
             broadcast=(
                 f"ROOM:slick_store:Slick sells {player.name} a special "
                 f"three-worm deal."
             ),
+        )
+
+    def _record_slick_spend(self, player: Player, amount: int) -> str:
+        """Track Slick purchases and return his one-time back-room invitation."""
+        player.slick_gold_spent += max(0, int(amount))
+        if not self._maybe_unlock_ceelo_access(player):
+            return ""
+        self.player_manager.save_player(player)
+        return (
+            '\nSlick weighs your coin in his palm, then nods toward an Employees '
+            'Only door. "You\'ve spent a lot of gold here. Want to see if you '
+            'can get some more? West, if you\'ve got the nerve."'
         )
 
     def _decline_slick_worm_deal(self, player: Player) -> CommandResult:
@@ -358,7 +383,7 @@ class GameCommands:
 
         if old_room:
             old_room.players.discard(player.name)
-            if old_room.id == "slick_store":
+            if old_room.id in {"slick_store", CEELO_ROOM_ID}:
                 player.clear_slick_visit()
 
         player.jail_visits += 1
@@ -401,14 +426,51 @@ class GameCommands:
         room = self.rooms.get(player.current_room)
         if not room:
             return CommandResult("You're in a void... something went wrong!")
-        
-        return CommandResult(room.get_description(current_player=player.name))
+
+        self._maybe_unlock_ceelo_access(player)
+        return CommandResult(self._room_description(player, room))
+
+    def _maybe_unlock_ceelo_access(self, player: Player) -> bool:
+        """Permanently unlock Slick's hidden west door when either gate passes."""
+        if player.ceelo_access_unlocked:
+            return False
+        if (
+            player.get_effective_attribute("charisma") >= CEELO_ACCESS_CHARISMA
+            or player.slick_gold_spent >= CEELO_SPEND_UNLOCK
+        ):
+            player.ceelo_access_unlocked = True
+            self.player_manager.save_player(player)
+            return True
+        return False
+
+    def _room_description(self, player: Player, room: Room) -> str:
+        """Render Slick's west door only for players who have unlocked it."""
+        description = room.get_description(current_player=player.name)
+        if room.id != "slick_store" or not player.ceelo_access_unlocked:
+            return description
+        description = description.replace(
+            "\nExits: [north]",
+            "\nA door marked EMPLOYEES ONLY stands open to the west."
+            "\n\nExits: [north, west]",
+        )
+        return description
 
     def _look_direction(self, player: Player, direction: str) -> CommandResult:
         """Peer into an adjacent room and report items, NPCs, and players."""
         room = self.rooms.get(player.current_room)
         if not room:
             return CommandResult("You're in a void... something went wrong!")
+
+        if (
+            room.id == "slick_store"
+            and direction == "west"
+            and player.ceelo_access_unlocked
+        ):
+            adj = self.rooms.get(CEELO_ROOM_ID)
+            return CommandResult(
+                message=f"You peer west toward {adj.name}.\nYou spot:\n  - Curt",
+                broadcast=f"ROOM:{room.id}:{player.name} peers west.",
+            )
 
         if direction not in room.exits:
             return CommandResult(f"You can't look {direction} from here.")
@@ -447,9 +509,22 @@ class GameCommands:
         
         if not room:
             return CommandResult("You can't move - you're nowhere!")
-        
+
+        if room.id == "slick_store" and direction == "west":
+            if not player.ceelo_access_unlocked:
+                return CommandResult("You can't go west from here.")
+            if player.ceelo_kicked_visit_id == player.slick_visit_id:
+                return CommandResult(
+                    'Slick blocks the Employees Only door. "Curt says you\'re '
+                    'done spectating this visit. Take a walk."'
+                )
+            new_room_id = CEELO_ROOM_ID
+        else:
+            new_room_id = room.exits.get(direction)
+
         if direction not in room.exits:
-            return CommandResult(f"You can't go {direction} from here.")
+            if not (room.id == "slick_store" and direction == "west" and new_room_id):
+                return CommandResult(f"You can't go {direction} from here.")
 
         # Jail exit stays locked until the sentence is up
         if room.id == "jail" and player.is_jail_locked():
@@ -460,10 +535,8 @@ class GameCommands:
             )
         
         # Check destination
-        new_room_id = room.exits[direction]
-        
         # Check if trying to enter Slick's while banned
-        if new_room_id == "slick_store" and player.is_banned_from_slicks():
+        if new_room_id in {"slick_store", CEELO_ROOM_ID} and player.is_banned_from_slicks():
             remaining = player.get_slick_ban_remaining()
             minutes = remaining // 60
             seconds = remaining % 60
@@ -484,17 +557,25 @@ class GameCommands:
         player.current_room = new_room_id
         new_room.players.add(player.name)
 
-        if old_room.id == "slick_store" and new_room_id != "slick_store":
+        slick_rooms = {"slick_store", CEELO_ROOM_ID}
+        if old_room.id in slick_rooms and new_room_id not in slick_rooms:
             player.clear_slick_visit()
-        elif new_room_id == "slick_store" and old_room.id != "slick_store":
+        elif new_room_id in slick_rooms and old_room.id not in slick_rooms:
             player.begin_slick_visit()
+
+        invitation = ""
+        if new_room_id == "slick_store" and self._maybe_unlock_ceelo_access(player):
+            invitation = (
+                '\n\nSlick eyes you, then jerks his thumb toward an Employees Only '
+                'door to the west. "You look like you can handle Curt\'s table."'
+            )
         
         # Build response
         leave_msg = f"{player.name} heads {direction}."
         arrive_msg = f"{player.name} arrives."
         
         result = CommandResult(
-            message=new_room.get_description(current_player=player.name),
+            message=self._room_description(player, new_room) + invitation,
             broadcast=f"ROOM:{old_room.id}:{leave_msg}|ROOM:{new_room_id}:{arrive_msg}"
         )
         return result
@@ -1258,10 +1339,44 @@ class GameCommands:
                 return item
         return None
 
+    def _format_repairable_list(self, player: Player) -> str:
+        """Show worn and carried items a toolkit could restore to new."""
+        equip_lines = []
+        for slot in ("head", "neck", "chest", "hands", "fingers", "legs", "feet"):
+            item = player.worn_items.get(slot)
+            if item and item.can_be_repaired():
+                equip_lines.append(f"  {slot:<10} {item.display_name}")
+        if player.equipped_pole and player.equipped_pole.can_be_repaired():
+            equip_lines.append(
+                f"  {'pole':<10} {player.equipped_pole.display_name}"
+            )
+        if player.equipped_lure and player.equipped_lure.can_be_repaired():
+            equip_lines.append(
+                f"  {'lure':<10} {player.equipped_lure.display_name}"
+            )
+
+        carried_lines = []
+        for number, item in enumerate(player.get_inventory_display_order(), start=1):
+            if item.can_be_repaired():
+                carried_lines.append(f"  {number}) {item.display_name}")
+
+        if not equip_lines and not carried_lines:
+            return "Nothing you carry needs repairing."
+
+        lines = ["\n  REPAIRABLE ITEMS", "=" * 40]
+        if equip_lines:
+            lines.append("\nEquipment:")
+            lines.extend(equip_lines)
+        if carried_lines:
+            lines.append("\nCarried:")
+            lines.extend(carried_lines)
+        lines.append("\nType 'repair <item>' or 'repair <#>'.")
+        return "\n".join(lines)
+
     def cmd_repair(self, player: Player, item_name: str) -> CommandResult:
         """Repair an item using a toolkit. Takes time based on Int/Dex."""
         if not item_name:
-            return CommandResult("Repair what? Usage: repair <item>")
+            return CommandResult(self._format_repairable_list(player))
 
         target = player.find_item(item_name)
         if not target:
@@ -1468,7 +1583,8 @@ class GameCommands:
                 player.add_item(lure)
                 lines.append("")
                 lines.append(
-                    "You notice this fish had a lure already hooked in its "
+                    "You notice this fish had a "
+                    f"{colorize_condition(2, 'lure')} already hooked in its "
                     "mouth. You carefully remove it."
                 )
                 lines.append(
@@ -1773,7 +1889,7 @@ class GameCommands:
         ]
         index = 10 if population >= 100 else max(0, population // 10)
         word, template = bands[index]
-        # Same scheme as item condition: 0 red, 1-4 yellow, 5-8 green, 9 teal
+        # Same palette as item condition (0 red … 9 teal)
         quality = 9 if index >= 9 else index
         return template.format(d=colorize_condition(quality, word))
     
@@ -1827,7 +1943,7 @@ class GameCommands:
         key = player.name.lower()
         if key not in self.norm_rounds:
             self.norm_rounds[key] = NormRound(
-                target=create_random_bubba_fish_quest()
+                target=create_random_norm_fish_quest()
             )
             return (
                 "Hello! I want to see a specific fish! "
@@ -1856,6 +1972,12 @@ class GameCommands:
                 '"Say hello first! Then I\'ll think of a fish."'
             )
 
+        if item.id == "sting_puffer":
+            return CommandResult(
+                f"Norm hands back your {item.display_name}.\n"
+                '"WHOA!! That looks dangerous, I wasn\'t thinking of that!"'
+            )
+
         target = round_state.target
         matches = sum((
             item.id == target.fish_id,
@@ -1867,7 +1989,7 @@ class GameCommands:
             reward = create_item_copy(SPECIALTY_LURE, roll_stats=False, condition=9)
             player.add_item(reward)
             self.norm_rounds[key] = NormRound(
-                target=create_random_bubba_fish_quest()
+                target=create_random_norm_fish_quest()
             )
             return CommandResult(
                 f"Norm looks over your {item.display_name}, then hands it back.\n"
@@ -1920,6 +2042,10 @@ class GameCommands:
         if name.lower() == "bubba":
             lines.append("Bubba nods back at you.")
             broadcasts.append(f"ROOM:{room.id}:Bubba nods back at {player.name}.")
+            if self.market:
+                quest_lines = self.market.get_bubba_quest_status_lines()
+                if quest_lines:
+                    lines.extend(quest_lines)
         elif name.lower() == "cliff":
             lines.append("Cliff nods once, already looking back at the vise.")
             broadcasts.append(
@@ -2049,6 +2175,11 @@ class GameCommands:
 
         kind, name = found
         room = self.rooms.get(player.current_room)
+        if kind == "npc" and name.lower() == "curt":
+            if not self.ceelo_tip_handler:
+                return CommandResult("Curt taps the dice cup, but the table is closed.")
+            return self.ceelo_tip_handler(player, amount)
+
         player.gold -= amount
 
         lines = [f"You tip {name} {amount} gold."]
@@ -2104,6 +2235,17 @@ class GameCommands:
         return CommandResult(
             message="\n".join(lines),
             broadcast="|".join(broadcasts),
+        )
+
+    def cmd_roll(self, player: Player, args: str) -> CommandResult:
+        """Take a Cee-lo turn, or roll your eyes away from Curt's table."""
+        if player.current_room == CEELO_ROOM_ID:
+            if not self.ceelo_roll_handler:
+                return CommandResult('Curt taps the table. "Ante first."')
+            return self.ceelo_roll_handler(player)
+        return CommandResult(
+            "You roll your eyes.",
+            broadcast=f"ROOM:{player.current_room}:{player.name} rolls their eyes.",
         )
 
     def cmd_give(self, player: Player, args: str) -> CommandResult:
@@ -2256,7 +2398,7 @@ ITEMS:
   wear all              - Wear clothing into empty slots
   unequip/uneq/remove/rem [item] - Remove gear (bare removes all worn)
   remove <attr>         - Remove all gear boosting that attribute (e.g. rem con)
-  repair/fix <item>     - Repair gear with a toolkit (uses Int/Dex)
+  repair/fix [item]     - List worn gear, or repair with a toolkit (Int/Dex)
   stats/attributes      - Show character attributes and level
 
 FISHING:
@@ -2453,6 +2595,11 @@ TIPS:
             )
         
         player.gold -= price
+        slick_unlock = (
+            self._record_slick_spend(player, price)
+            if store_type == StoreType.SLICK
+            else ""
+        )
         bought_kit = item.id == "lure_kit"
         # Store-bought fishing gear is always brand new
         if bought_kit:
@@ -2478,6 +2625,7 @@ TIPS:
             return CommandResult(
                 f"Slick grins and slides you a {new_item.display_name} for {price} gold.\n"
                 f"\"Pleasure doing business.\" You have {player.gold} gold remaining."
+                f"{slick_unlock}"
             )
         return CommandResult(
             f"You buy a {new_item.display_name} for {price} gold.\n"

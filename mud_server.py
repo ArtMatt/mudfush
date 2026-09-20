@@ -13,7 +13,8 @@ import sys
 import os
 import time
 import logging
-from typing import Dict, Optional, Set
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
 from world import create_world, Room, reset_ground_items, population_shift_message
@@ -32,6 +33,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 monotonic = time.monotonic
 REEL_ABORT_WORDS = frozenset({"cut", "snap", "drop", "abort"})
+CEELO_ROOM_ID = "slick_backroom"
+CEELO_JOIN_SECONDS = 15
+CEELO_TURN_SECONDS = 15
+CEELO_IDLE_LIMIT = 3
+CEELO_MIN_ANTE = 10
+CEELO_MAX_PLAYERS = 3  # Curt plus up to three players
+
+
+@dataclass
+class CeeloRound:
+    round_id: int
+    ante: int
+    participants: List[str] = field(default_factory=list)
+    phase: str = "joining"
+    curt_score: Optional[Tuple[int, int]] = None
+    scores: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    rolled_players: Set[str] = field(default_factory=set)
+    turn_order: List[str] = field(default_factory=list)
+    turn_index: int = 0
 
 
 class ReelAborted(Exception):
@@ -56,6 +76,8 @@ class FishingMUD:
             lake_state=self.lake_state,
             fishermen=self.fishermen,
         )
+        self.commands.ceelo_tip_handler = self.join_ceelo
+        self.commands.ceelo_roll_handler = self.roll_ceelo
         self.sessions: Dict[str, 'MUDSession'] = {}  # player_name -> session
         self._autosave_task = None
         self._weather_task = None
@@ -66,6 +88,11 @@ class FishingMUD:
         self._fisherman_fish_tasks = []
         self._npc_fishing: Set[str] = set()
         self._fishermen_relocating = False
+        self.ceelo_round: Optional[CeeloRound] = None
+        self._ceelo_round_id = 0
+        self._ceelo_join_task = None
+        self._ceelo_turn_task = None
+        self._ceelo_missed_rounds: Dict[str, int] = {}
         self.shutdown_event = asyncio.Event()
         self.started_at = time.time()
         
@@ -77,7 +104,287 @@ class FishingMUD:
         saved_players = self.player_manager.get_all_saved_players()
         if saved_players:
             logger.info(f"Found {len(saved_players)} saved player(s)")
-    
+
+    @staticmethod
+    def _ceelo_throw() -> Tuple[Tuple[int, int, int], Tuple[int, int], str, int]:
+        """Roll until Cee-lo produces 4-5-6, 1-2-3, triples, or a point."""
+        tosses = 0
+        while True:
+            tosses += 1
+            dice = tuple(sorted(random.randint(1, 6) for _ in range(3)))
+            if dice == (4, 5, 6):
+                return dice, (4, 0), "4-5-6 — automatic win", tosses
+            if dice == (1, 2, 3):
+                return dice, (1, 0), "1-2-3 — automatic loss", tosses
+            if dice[0] == dice[2]:
+                return dice, (3, dice[0]), f"triple {dice[0]}s", tosses
+            if dice[0] == dice[1]:
+                return dice, (2, dice[2]), f"{dice[2]} point", tosses
+            if dice[1] == dice[2]:
+                return dice, (2, dice[0]), f"{dice[0]} point", tosses
+
+    @staticmethod
+    def _ceelo_roll_text(
+        roller: str, dice: Tuple[int, int, int], label: str, tosses: int
+    ) -> str:
+        reroll = f" after {tosses} tosses" if tosses > 1 else ""
+        return f"{roller} rolls {dice[0]} {dice[1]} {dice[2]}{reroll}: {label}."
+
+    def join_ceelo(self, player: Player, ante: int) -> CommandResult:
+        """Ante at Curt's table and open/join the 15-second seating window."""
+        if player.current_room != CEELO_ROOM_ID:
+            return CommandResult("Curt isn't here.")
+        if ante < CEELO_MIN_ANTE:
+            return CommandResult(
+                f'Curt pushes it back. "Minimum ante is {CEELO_MIN_ANTE} gold."'
+            )
+        if player.gold < ante:
+            return CommandResult(f"You only have {player.gold} gold.")
+
+        current = self.ceelo_round
+        if current and current.phase != "joining":
+            return CommandResult(
+                'Curt covers the cup with one hand. "This hand is already rolling."'
+            )
+        if current and player.name in current.participants:
+            return CommandResult('"You already anted," Curt says.')
+        if current and len(current.participants) >= CEELO_MAX_PLAYERS:
+            return CommandResult('"Table\'s full," Curt says. "Next hand."')
+        if current and ante != current.ante:
+            return CommandResult(
+                f'Curt taps the pot. "Ante is {current.ante} gold this hand."'
+            )
+
+        player.gold -= ante
+        if not current:
+            self._ceelo_round_id += 1
+            current = CeeloRound(self._ceelo_round_id, ante)
+            self.ceelo_round = current
+            current.participants.append(player.name)
+            self._ceelo_join_task = asyncio.create_task(
+                self._open_ceelo_table(current.round_id)
+            )
+            return CommandResult(
+                f"You slide Curt {ante} gold. He matches it and sets out the cup.\n"
+                f"(Others have {CEELO_JOIN_SECONDS} seconds to tip Curt {ante} gold.)",
+                broadcast=(
+                    f"ROOM:{CEELO_ROOM_ID}:{player.name} antes {ante} gold. "
+                    f"Curt opens the table for {CEELO_JOIN_SECONDS} seconds."
+                ),
+            )
+
+        current.participants.append(player.name)
+        return CommandResult(
+            f"You match the {ante}-gold ante and take a place at Curt's table.",
+            broadcast=(
+                f"ROOM:{CEELO_ROOM_ID}:{player.name} matches the {ante}-gold ante."
+            ),
+        )
+
+    async def _open_ceelo_table(self, round_id: int) -> None:
+        await asyncio.sleep(CEELO_JOIN_SECONDS)
+        current = self.ceelo_round
+        if not current or current.round_id != round_id or current.phase != "joining":
+            return
+
+        seated = []
+        for name in current.participants:
+            player = self.player_manager.find_online_player(name)
+            if player and player.current_room == CEELO_ROOM_ID:
+                seated.append(name)
+            elif player:
+                player.gold += current.ante
+        current.participants = seated
+        if not seated:
+            self.ceelo_round = None
+            return
+
+        current.phase = "rolling"
+        dice, score, label, tosses = self._ceelo_throw()
+        current.curt_score = score
+        current.turn_order = list(seated)
+        current.turn_index = 0
+        await self.broadcast_to_room(
+            CEELO_ROOM_ID,
+            self._ceelo_roll_text("Curt", dice, label, tosses)
+            + f"\n{current.turn_order[0]}, type ROLL. "
+            f"(You have {CEELO_TURN_SECONDS} seconds.)",
+        )
+        self._schedule_ceelo_turn_timeout(current)
+
+    def roll_ceelo(self, player: Player) -> CommandResult:
+        """Resolve the current player's Cee-lo throw."""
+        current = self.ceelo_round
+        if not current:
+            return CommandResult('Curt taps the empty pot. "Tip me an ante first."')
+        if current.phase == "joining":
+            return CommandResult(
+                f'Curt shakes the cup. "Seats are still open — {CEELO_JOIN_SECONDS} '
+                'seconds from the first ante."'
+            )
+        if player.name not in current.participants:
+            return CommandResult('"You aren\'t in this hand," Curt says.')
+        expected = (
+            current.turn_order[current.turn_index]
+            if current.turn_index < len(current.turn_order)
+            else None
+        )
+        if player.name != expected:
+            return CommandResult(
+                f"Wait for {expected or 'Curt'} to finish their turn."
+            )
+
+        self._cancel_ceelo_turn_timeout()
+        dice, score, label, tosses = self._ceelo_throw()
+        current.scores[player.name] = score
+        current.rolled_players.add(player.name)
+        text = self._ceelo_roll_text(player.name, dice, label, tosses)
+        self._advance_ceelo_turn(current)
+        next_name = self._current_ceelo_player(current)
+        if next_name:
+            text += (
+                f"\n{next_name}, type ROLL. "
+                f"(You have {CEELO_TURN_SECONDS} seconds.)"
+            )
+            self._schedule_ceelo_turn_timeout(current)
+        else:
+            text += "\n" + self._resolve_ceelo_scores(current)
+        return CommandResult(
+            text,
+            broadcast=f"ROOM:{CEELO_ROOM_ID}:{text}",
+        )
+
+    @staticmethod
+    def _current_ceelo_player(current: CeeloRound) -> Optional[str]:
+        if current.turn_index >= len(current.turn_order):
+            return None
+        return current.turn_order[current.turn_index]
+
+    @staticmethod
+    def _advance_ceelo_turn(current: CeeloRound) -> None:
+        current.turn_index += 1
+
+    def _schedule_ceelo_turn_timeout(self, current: CeeloRound) -> None:
+        expected = self._current_ceelo_player(current)
+        if not expected:
+            return
+        self._ceelo_turn_task = asyncio.create_task(
+            self._ceelo_turn_timeout(current.round_id, expected)
+        )
+
+    def _cancel_ceelo_turn_timeout(self) -> None:
+        if self._ceelo_turn_task and not self._ceelo_turn_task.done():
+            self._ceelo_turn_task.cancel()
+        self._ceelo_turn_task = None
+
+    async def _ceelo_turn_timeout(self, round_id: int, expected: str) -> None:
+        await asyncio.sleep(CEELO_TURN_SECONDS)
+        current = self.ceelo_round
+        if (
+            not current
+            or current.round_id != round_id
+            or self._current_ceelo_player(current) != expected
+        ):
+            return
+        self._advance_ceelo_turn(current)
+        next_name = self._current_ceelo_player(current)
+        message = f"{expected} waits too long and forfeits the hand."
+        if next_name:
+            message += (
+                f"\n{next_name}, type ROLL. "
+                f"(You have {CEELO_TURN_SECONDS} seconds.)"
+            )
+            self._schedule_ceelo_turn_timeout(current)
+        else:
+            message += "\n" + self._resolve_ceelo_scores(current)
+        await self.broadcast_to_room(CEELO_ROOM_ID, message)
+
+    def _resolve_ceelo_scores(self, current: CeeloRound) -> str:
+        """Award the pot, or set up a tied high-score reroll."""
+        scores = dict(current.scores)
+        if current.curt_score is not None:
+            scores["Curt"] = current.curt_score
+        if not scores:
+            return self._finish_ceelo_round(current, "Curt takes the unattended pot.")
+
+        high = max(scores.values())
+        leaders = [name for name, score in scores.items() if score == high]
+        if len(leaders) > 1:
+            lines = [f"{', '.join(leaders)} tie for the high roll. They reroll."]
+            current.scores.clear()
+            current.curt_score = None
+            if "Curt" in leaders:
+                dice, score, label, tosses = self._ceelo_throw()
+                current.curt_score = score
+                lines.append(self._ceelo_roll_text("Curt", dice, label, tosses))
+            current.turn_order = [name for name in leaders if name != "Curt"]
+            current.turn_index = 0
+            next_name = self._current_ceelo_player(current)
+            if next_name:
+                lines.append(
+                    f"{next_name}, type ROLL. "
+                    f"(You have {CEELO_TURN_SECONDS} seconds.)"
+                )
+                self._schedule_ceelo_turn_timeout(current)
+                return "\n".join(lines)
+            # Only Curt remained after a player timeout during a prior tiebreak.
+            return "\n".join(lines + [
+                self._finish_ceelo_round(current, "Curt takes the pot.")
+            ])
+
+        winner = leaders[0]
+        pot = current.ante * (len(current.participants) + 1)
+        if winner == "Curt":
+            return self._finish_ceelo_round(
+                current, f'Curt rakes in the {pot}-gold pot. "House takes it."'
+            )
+        player = self.player_manager.find_online_player(winner)
+        if player:
+            player.gold += pot
+        return self._finish_ceelo_round(
+            current,
+            f"{winner} wins the {pot}-gold pot! (Gold: {player.gold if player else pot})",
+        )
+
+    def _finish_ceelo_round(self, current: CeeloRound, result: str) -> str:
+        """Track spectators, eject three-round idlers, and clear the table."""
+        self._cancel_ceelo_turn_timeout()
+        kicked = []
+        for player in self.player_manager.get_players_in_room(CEELO_ROOM_ID):
+            key = player.name.lower()
+            if player.name in current.rolled_players:
+                self._ceelo_missed_rounds[key] = 0
+                continue
+            missed = self._ceelo_missed_rounds.get(key, 0) + 1
+            self._ceelo_missed_rounds[key] = missed
+            if missed < CEELO_IDLE_LIMIT:
+                continue
+            self.rooms[CEELO_ROOM_ID].players.discard(player.name)
+            self.rooms["slick_store"].players.add(player.name)
+            player.current_room = "slick_store"
+            player.ceelo_kicked_visit_id = player.slick_visit_id
+            kicked.append(player.name)
+            session = self.sessions.get(player.name)
+            if session:
+                asyncio.create_task(
+                    session.send_message(
+                        "\nCurt points at the door. \"Three hands watching is "
+                        "enough. Come back another time.\"\n"
+                        + self.commands._room_description(
+                            player, self.rooms["slick_store"]
+                        )
+                        + "\n> "
+                    )
+                )
+        self.ceelo_round = None
+        if kicked:
+            result += (
+                "\nCurt points at the door. "
+                f"{', '.join(kicked)} {'has' if len(kicked) == 1 else 'have'} "
+                "watched three hands without playing and gets sent back out front."
+            )
+        return result
+
     async def start_autosave(self, interval: int = 300):
         """Start periodic auto-save task (default every 5 minutes)."""
         async def autosave_loop():
@@ -316,6 +623,10 @@ class FishingMUD:
             for task in self._fisherman_fish_tasks:
                 task.cancel()
             self._fisherman_fish_tasks = []
+        if self._ceelo_join_task and not self._ceelo_join_task.done():
+            self._ceelo_join_task.cancel()
+        self._ceelo_join_task = None
+        self._cancel_ceelo_turn_timeout()
     
     def register_session(self, player_name: str, session: 'MUDSession'):
         """Register a session for a player."""
@@ -1080,8 +1391,8 @@ class MUDSession:
             result = self.game.commands.cmd_look(self.player, "")
             await self.send_message(result.message + "\n")
 
-            # If logging in already inside Slick's, start the visit timer
-            if self.player.current_room == "slick_store":
+            # If logging in anywhere inside Slick's, start the visit timer
+            if self.player.current_room in {"slick_store", CEELO_ROOM_ID}:
                 self.player.begin_slick_visit()
             self._sync_slick_deal_timer()
             
@@ -1285,7 +1596,19 @@ class MUDSession:
         helpful_chance = self._helpful_reel_chance(
             challenge.intelligence, challenge.wisdom
         )
-        helpful_actions = ("reel", "pull", "slack", "yank")
+        helpful_actions = (
+            "reel",
+            "pull",
+            "slack",
+            "yank",
+            "pump",
+            "crank",
+            "wind",
+            "lift",
+            "ease",
+            "bow",
+            "snub",
+        )
 
         progress = [
             [original * 0.8, "You still have a lot of line to reel in", False],
