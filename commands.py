@@ -1972,10 +1972,17 @@ class GameCommands:
                 '"Say hello first! Then I\'ll think of a fish."'
             )
 
-        if item.id == "sting_puffer":
+        skip_lines = {
+            "sting_puffer": (
+                "WHOA!! That looks dangerous, I wasn't thinking of that!"
+            ),
+            "bluegill": "No way, not that boring fish!",
+        }
+        skip_line = skip_lines.get(item.id)
+        if skip_line:
             return CommandResult(
                 f"Norm hands back your {item.display_name}.\n"
-                '"WHOA!! That looks dangerous, I wasn\'t thinking of that!"'
+                f'"{skip_line}"'
             )
 
         target = round_state.target

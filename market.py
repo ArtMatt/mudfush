@@ -117,12 +117,15 @@ def create_random_bubba_fish_quest() -> BubbaFishQuest:
     return _random_fish_quest(_BUBBA_QUEST_FISH)
 
 
-# Norm will not think of a sting puffer; showing one is never a guess.
-_NORM_QUEST_FISH = [fish for fish in _BUBBA_QUEST_FISH if fish.id != "sting_puffer"]
+# Norm will not think of these; showing one is never a guess.
+_NORM_FORBIDDEN_IDS = frozenset({"sting_puffer", "bluegill"})
+_NORM_QUEST_FISH = [
+    fish for fish in _BUBBA_QUEST_FISH if fish.id not in _NORM_FORBIDDEN_IDS
+]
 
 
 def create_random_norm_fish_quest() -> BubbaFishQuest:
-    """Create Norm's hidden fish: same rules as Bubba, never a sting puffer."""
+    """Create Norm's hidden fish: same rules as Bubba, never puffer or bluegill."""
     return _random_fish_quest(_NORM_QUEST_FISH)
 
 

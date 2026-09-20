@@ -816,10 +816,25 @@ class GameplayQualityTests(unittest.TestCase):
         self.assertEqual(self.commands.norm_rounds["angler"].target.fish_id, "bass")
         self.assertIn(puffer, player.inventory)
 
-    def test_norm_never_thinks_of_a_sting_puffer(self):
+    def test_norm_refuses_bluegill_without_using_a_guess(self):
+        player = Player("angler", current_room="east_path")
+        self.commands.norm_rounds["angler"] = NormRound(self._norm_target())
+        bluegill = create_item_copy(BLUEGILL, roll_stats=False, condition=9)
+        bluegill.fish_size = "average"
+        player.add_item(bluegill)
+
+        result = self.commands._give_to_norm(player, bluegill)
+
+        self.assertIn("No way, not that boring fish", result.message)
+        self.assertNotIn("guess", result.message.lower())
+        self.assertEqual(self.commands.norm_rounds["angler"].guesses, 0)
+        self.assertEqual(self.commands.norm_rounds["angler"].target.fish_id, "bass")
+        self.assertIn(bluegill, player.inventory)
+
+    def test_norm_never_thinks_of_a_sting_puffer_or_bluegill(self):
         for _ in range(200):
             quest = create_random_norm_fish_quest()
-            self.assertNotEqual(quest.fish_id, "sting_puffer")
+            self.assertNotIn(quest.fish_id, ("sting_puffer", "bluegill"))
 
     def test_specialty_lure_scores_size_relative_to_the_species(self):
         average_bass = specialty_lure_essence_from_fish(BASS, BASS)
