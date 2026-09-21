@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Callable, Set
 from enum import Enum
 
 from items import (
-    Item, ItemType, STORE_INVENTORY, WEARABLE_ITEMS, CONDITION_NAMES,
+    Item, ItemType, STORE_INVENTORY, WEARABLE_ITEMS, condition_word,
     colorize_condition, colorize_fish_size, colorize_fish_species,
     UNSELLABLE_TYPES, is_ancient_fish_id,
     BLUEGILL, BASS, CATFISH, TROUT, PIKE, LEGENDARY_CARP,
@@ -84,8 +84,8 @@ class BubbaFishQuest:
         return abs(item.weight - self.target_weight) < 0.15
 
     def offer_phrase(self) -> str:
-        """Plain speech: I'll pay double for a nice average northern pike."""
-        quality = CONDITION_NAMES.get(self.condition, "decent")
+        """Plain speech: I'll pay double for a healthy average northern pike."""
+        quality = condition_word(self.condition, ItemType.FISH)
         return (
             f"I'll pay double for a {quality} {self.fish_size} {self.fish_name}"
         )
@@ -94,7 +94,7 @@ class BubbaFishQuest:
         """Colored quality + size + name for UI listings."""
         quality = colorize_condition(
             self.condition,
-            CONDITION_NAMES.get(self.condition, "decent"),
+            condition_word(self.condition, ItemType.FISH),
         )
         size = colorize_fish_size(self.fish_size)
         species = colorize_fish_species(self.fish_id, self.fish_name)

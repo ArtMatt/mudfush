@@ -115,7 +115,7 @@ INVENTORY_SLOT_FILTERS = {
 }
 
 
-# Condition 0-9 descriptive labels
+# Condition 0-9 descriptive labels (gear and clothing)
 CONDITION_NAMES = {
     0: "broken",
     1: "ruined",
@@ -127,6 +127,20 @@ CONDITION_NAMES = {
     7: "nice",
     8: "fine",
     9: "new",
+}
+
+# Same 0-9 bands and colors; vitality words instead of wear.
+FISH_CONDITION_NAMES = {
+    0: "wasted",
+    1: "rotting",
+    2: "ragged",
+    3: "sickly",
+    4: "sluggish",
+    5: "ordinary",
+    6: "fair",
+    7: "healthy",
+    8: "lively",
+    9: "robust",
 }
 
 # ANSI colors for condition quality in terminal/SSH clients
@@ -159,15 +173,18 @@ def strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
+def condition_word(condition: int, item_type: Optional["ItemType"] = None) -> str:
+    """Plain 0-9 quality word; fish use vitality labels, everything else uses wear."""
+    level = max(0, min(9, int(condition)))
+    if item_type == ItemType.FISH:
+        return FISH_CONDITION_NAMES.get(level, "ordinary")
+    return CONDITION_NAMES.get(level, "bog-standard")
+
+
 def colorize_condition(condition: int, label: str) -> str:
     """
-    Color a condition label by quality:
-      0 broken              -> red
-      1-4 ruined to worn    -> yellow
-      5-6 bog-standard/decent -> bright yellow
-      7 nice                -> green
-      8 fine                -> bright green
-      9 new                 -> teal
+    Color a condition/quality label by numeric band:
+      0 red, 1-4 yellow, 5-6 bright yellow, 7 green, 8 bright green, 9 teal
     """
     level = max(0, min(9, condition))
     color = _CONDITION_COLORS[_CONDITION_LEVEL_COLOR[level]]
@@ -514,7 +531,7 @@ class Item:
     @property
     def condition_name(self) -> str:
         """Human-readable condition label (no color)."""
-        return CONDITION_NAMES.get(max(0, min(9, self.condition)), "bog-standard")
+        return condition_word(self.condition, self.item_type)
 
     @property
     def colored_condition_name(self) -> str:

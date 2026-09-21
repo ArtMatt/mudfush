@@ -14,6 +14,7 @@ from world import Room, DIRECTION_ALIASES
 from items import (
     Item, ItemType, STORE_INVENTORY, CATCHABLE_FISH, create_item_copy,
     DEGRADABLE_TYPES, strip_ansi, CONDITION_NAMES, colorize_condition,
+    condition_word,
     colorize_fish_size, attribute_abbrev, colorize_attribute,
     attribute_color_name, PLASTIC_WORM, create_beer, create_gem,
     create_glowing_lure, create_shard, UNSELLABLE_TYPES, GEMMABLE_TYPES,
@@ -1246,8 +1247,9 @@ class GameCommands:
             item.description,
         ]
         if not is_ancient_fish_id(item.id):
+            heading = "Quality" if item.item_type == ItemType.FISH else "Condition"
             lines.append(
-                f"Condition: {item.colored_condition_name} ({item.condition}/9)"
+                f"{heading}: {item.colored_condition_name} ({item.condition}/9)"
             )
         if item.modifiers:
             for attr, val in item.modifiers:
@@ -1540,15 +1542,18 @@ class GameCommands:
             ),
         )
 
-    def _repair_duration(self, player: Player) -> float:
+    def _repair_duration(self, player: Player, *, hand_repair: bool = False) -> float:
         """
         Base repair time is 60s, reduced by Intelligence and Dexterity.
-        Floor is 5 seconds.
+        Floor is 5 seconds. Hand-repair in jail takes three times as long.
         """
         intelligence = player.get_effective_attribute("intelligence")
         dexterity = player.get_effective_attribute("dexterity")
         reduction = 3 * ((intelligence - 1) + (dexterity - 1))
-        return float(max(5, 60 - reduction))
+        duration = float(max(5, 60 - reduction))
+        if hand_repair:
+            duration *= 3.0
+        return duration
 
     def _find_usable_toolkit(self, player: Player, exclude: Item = None) -> Optional[Item]:
         """Find a non-broken toolkit in inventory, optionally excluding one item."""
@@ -1631,7 +1636,10 @@ class GameCommands:
             )
 
         toolkit = self._find_usable_toolkit(player, exclude=target)
-        if not toolkit:
+        jail_hand_repair = (
+            toolkit is None and player.current_room == "jail"
+        )
+        if not toolkit and not jail_hand_repair:
             if target.item_type == ItemType.TOOLKIT:
                 return CommandResult(
                     "You need another working toolkit to repair this one."
@@ -1641,7 +1649,7 @@ class GameCommands:
                 "They're rare — check the stores."
             )
 
-        duration = self._repair_duration(player)
+        duration = self._repair_duration(player, hand_repair=jail_hand_repair)
         target_ref = target
         toolkit_ref = toolkit
         old_condition = target.condition
@@ -1653,29 +1661,42 @@ class GameCommands:
         def finish_repair() -> str:
             if target_ref not in player.inventory:
                 return "You lost the item before you could finish repairing it."
-            if toolkit_ref not in player.inventory or toolkit_ref.is_broken():
-                return "Your toolkit failed before the repair was finished."
+            if toolkit_ref is not None:
+                if toolkit_ref not in player.inventory or toolkit_ref.is_broken():
+                    return "Your toolkit failed before the repair was finished."
 
             target_ref.condition = 9
-            degrade_msg = toolkit_ref.degrade(1)
             lines = [
                 f"You finish repairing your {target_ref.display_name}.",
                 f"(Was {old_label}, now restored to {colorize_condition(9, 'new')}.)",
             ]
-            if degrade_msg:
-                lines.append(degrade_msg)
+            if toolkit_ref is not None:
+                degrade_msg = toolkit_ref.degrade(1)
+                if degrade_msg:
+                    lines.append(degrade_msg)
+                else:
+                    lines.append(
+                        f"Your {toolkit_ref.display_name} shows a little more wear."
+                    )
             else:
-                lines.append(
-                    f"Your {toolkit_ref.display_name} shows a little more wear."
-                )
+                lines.append("You didn't have a toolkit, so it took a while.")
             return "\n".join(lines)
 
         seconds = int(duration)
+        if jail_hand_repair:
+            start = (
+                f"You've got time and no toolkit, so you sit on the jail bench "
+                f"and work your {target.plain_display_name} by hand...\n"
+            )
+        else:
+            start = (
+                f"You set to work on your {target.plain_display_name} with your "
+                f"{toolkit.plain_display_name}...\n"
+            )
         return CommandResult(
             message="",
             immediate_message=(
-                f"You set to work on your {target.plain_display_name} with your "
-                f"{toolkit.plain_display_name}...\n"
+                f"{start}"
                 f"(Repairing — about {seconds} second{'s' if seconds != 1 else ''}. "
                 f"Higher Intelligence and Dexterity speed this up.)"
             ),
@@ -2200,7 +2221,7 @@ class GameCommands:
 
     @staticmethod
     def _norm_target_name(target: BubbaFishQuest) -> str:
-        quality = CONDITION_NAMES.get(target.condition, "decent")
+        quality = condition_word(target.condition, ItemType.FISH)
         return f"{quality} {target.fish_size} {target.fish_name}"
 
     def _give_to_norm(self, player: Player, item: Item) -> CommandResult:
@@ -2661,6 +2682,7 @@ ITEMS:
   remove <attr>         - Remove all gear boosting that attribute (e.g. rem con)
   repair/fix [item]     - List worn gear, or repair with a toolkit (Int/Dex)
   repair/fix next       - Repair the next item that isn't new
+                          (in jail you can mend by hand, 3× slower)
   stats/attributes      - Show character attributes and level
 
 FISHING:
