@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
-from items import Item, ItemType, WearSlot
+from items import Item, ItemType, WearSlot, is_ancient_fish_id
 
 
 SAVE_DIR = Path("saves")
@@ -104,8 +104,12 @@ class Player:
     beer_confirm_attr: Optional[str] = None
     # Reserved during the reel, before Ancient Whiskers reaches inventory
     ancient_whiskers_reserved: bool = False
+    # Runtime-only ancient catches reserved during a reel.
+    reserved_unique_fish_ids: Set[str] = field(default_factory=set)
     # Runtime-only: CUT/Ctrl-G hint shown on the first two hooks this login
     cut_reminders_shown: int = 0
+    # Runtime-only: last lake population tick a fish was released to pay the lake
+    last_fish_release_cycle: int = -1
     # Wearables worn since the last timed clothing-degrade tick
     clothes_worn_since_degrade: Set[int] = field(default_factory=set)
 
@@ -242,6 +246,7 @@ class Player:
                 "modifier_value": item.modifier_value,
                 "fish_size": item.fish_size,
                 "gem_attribute": item.gem_attribute,
+                "shard_progress": item.shard_progress,
                 "attracts_fish_id": item.attracts_fish_id,
                 "lure_essence": item.lure_essence,
             }
@@ -264,12 +269,12 @@ class Player:
             "password_hash": self.password_hash,
             "password_salt": self.password_salt,
             "current_room": self.current_room,
-            # Ancient Whiskers returns to the lake on logout/restart and is
+            # Ancient fish return to the lake on logout/restart and are
             # therefore never persisted in a character save.
             "inventory": [
                 item_to_dict(item)
                 for item in self.inventory
-                if item.id != "ancient_whiskers"
+                if not is_ancient_fish_id(item.id)
             ],
             "gold": self.gold,
             "equipped_pole_idx": equipped_pole_idx,
@@ -325,6 +330,7 @@ class Player:
                 modifiers=mods,
                 fish_size=d.get("fish_size"),
                 gem_attribute=d.get("gem_attribute"),
+                shard_progress=int(d.get("shard_progress") or 0),
                 attracts_fish_id=d.get("attracts_fish_id"),
                 lure_essence=float(d.get("lure_essence") or 0.0),
             )

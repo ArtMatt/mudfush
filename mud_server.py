@@ -510,6 +510,7 @@ class FishingMUD:
         async def population_loop():
             while True:
                 await asyncio.sleep(interval)
+                self.commands.population_cycle += 1
                 for room in self.rooms.values():
                     if not room.is_water:
                         continue
@@ -750,6 +751,7 @@ Admin console commands:
   who                          List online players
   uptime                       Show how long the server has been running
   saves                        List saved player characters
+  stats                        List each saved player's level and lifetime catch
   save                         Force-save all online players
   broadcast <message>          Send a message to everyone
   kick <name>                  Disconnect a player
@@ -787,6 +789,9 @@ Admin console commands:
             if not saved:
                 return "No saved players."
             return "Saved players:\n  " + "\n  ".join(sorted(saved))
+
+        if cmd == "stats":
+            return self._admin_stats()
 
         if cmd == "save":
             self.player_manager.save_all_players()
@@ -843,6 +848,28 @@ Admin console commands:
 
         self.shutdown_event.set()
         return f"Saved {saved} player(s). Shutting down..."
+
+    def _admin_stats(self) -> str:
+        """List saved players' levels and lifetime catch, like saves."""
+        saved = self.player_manager.get_all_saved_players()
+        if not saved:
+            return "No saved players."
+        lines = ["Player stats:"]
+        listed = 0
+        for name in sorted(saved, key=str.lower):
+            player = self.player_manager.find_online_player(name)
+            if player is None:
+                player = self.player_manager.load_player(name)
+            if player is None:
+                continue
+            listed += 1
+            lines.append(
+                f"  {player.name}  Lv {player.level}  "
+                f"{player.fish_caught} fish  "
+                f"{player.total_weight_caught:.1f} lbs"
+            )
+        lines.append(f"Total: {listed}")
+        return "\n".join(lines)
 
     def _admin_who(self) -> str:
         players = list(self.player_manager.players.values())
@@ -1064,7 +1091,7 @@ Admin console commands:
         return await self._apply_player_reset(offline, online=False)
 
     async def _apply_player_reset(self, source: Player, online: bool) -> str:
-        self.commands.release_ancient_whiskers(source)
+        self.commands.release_unique_fish(source)
         fresh = self.player_manager.create_reset_player(source)
 
         if online:
@@ -1122,7 +1149,7 @@ Admin console commands:
 
         display = canonical or name
         if online:
-            self.commands.release_ancient_whiskers(online)
+            self.commands.release_unique_fish(online)
             session = self.sessions.get(online.name)
             room = self.rooms.get(online.current_room)
             if room:
@@ -1495,7 +1522,7 @@ class MUDSession:
                                 result.reel_challenge
                             )
                             if not landed:
-                                self.game.commands.release_ancient_whiskers(
+                                self.game.commands.release_unique_fish(
                                     self.player
                                 )
                                 degrade = self.player.degrade_fishing_gear(
@@ -1607,15 +1634,88 @@ class MUDSession:
 
     @staticmethod
     def _helpful_reel_success_message(action: str, elapsed: float) -> str:
-        """Flavor for a successful HRE, keyed to how fast the player answered."""
+        """Action-specific fishing flavor, keyed to how fast the player answered."""
         bucket = MUDSession._helpful_reel_reaction_bucket(elapsed)
-        lines = (
-            f"Perfect {action}! The line sings and the fish surges in.",
-            f"Sharp {action}! You steal a long pull of line.",
-            f"Solid {action}. The fish comes in easier.",
-            f"A late {action}, but you still gain ground.",
-            f"You {action} just in time and take a little slack.",
-        )
+        messages = {
+            "reel": (
+                "You reel fast and smoothly, bringing the fish surging closer.",
+                "You reel hard and steal a long stretch of line.",
+                "You reel steadily and bring the fish closer.",
+                "You reel late, but still gain some line.",
+                "You reel just in time and recover a little line.",
+            ),
+            "pull": (
+                "You pull the rod back at the perfect moment and drag the fish closer.",
+                "You pull firmly and take a long stretch of line.",
+                "You pull against the fish and gain ground.",
+                "Your late pull still draws the fish closer.",
+                "You pull just in time and keep the fish moving your way.",
+            ),
+            "slack": (
+                "You sweep up every inch of slack before the fish can turn.",
+                "You quickly take up the slack and tighten the line.",
+                "You gather the slack and regain control.",
+                "You catch the slack late, but the hook stays set.",
+                "You take up the last of the slack just before the fish bolts.",
+            ),
+            "yank": (
+                "You yank sharply and turn the fish straight toward you.",
+                "A sharp yank steals a long pull of line.",
+                "You yank the rod and bring the fish closer.",
+                "Your late yank still turns the fish a little.",
+                "You yank just in time and stop the fish from gaining line.",
+            ),
+            "pump": (
+                "You pump the rod perfectly—lift, lower, reel—and haul the fish closer.",
+                "You pump the rod hard and gain a long stretch of line.",
+                "You pump the rod and steadily work the fish closer.",
+                "A late pump still gains you some line.",
+                "You squeeze in one pump before the fish can run again.",
+            ),
+            "crank": (
+                "You crank the handle furiously and make the spool sing.",
+                "You crank hard and win a long stretch of line.",
+                "You crank steadily and bring the fish closer.",
+                "You crank late, but still recover some line.",
+                "You get one crank in before the fish pulls away.",
+            ),
+            "wind": (
+                "You wind the loose line onto the spool in one smooth burst.",
+                "You wind quickly and recover a long stretch of line.",
+                "You wind the line in and gain ground.",
+                "You start winding late, but still recover some line.",
+                "You wind in the last bit of slack before the fish runs.",
+            ),
+            "lift": (
+                "You lift the rod tip high and lever the fish toward you.",
+                "A strong lift draws in a long stretch of line.",
+                "You lift the rod and bring the fish closer.",
+                "Your late lift still gains some ground.",
+                "You lift just before the fish can dive again.",
+            ),
+            "ease": (
+                "You ease the pressure perfectly, letting the fish tire without gaining line.",
+                "You ease the drag and absorb the fish's run.",
+                "You ease off enough to protect the line and keep control.",
+                "You ease the pressure late, but the line holds.",
+                "You ease off just before the line can snap.",
+            ),
+            "bow": (
+                "You bow the rod toward the fish, giving it just enough line to land safely.",
+                "You bow the rod and absorb the fish's sudden surge.",
+                "You lower the rod tip and keep the jumping fish hooked.",
+                "You bow late, but manage to keep tension on the line.",
+                "You bow the rod just before the fish can throw the hook.",
+            ),
+            "snub": (
+                "You snub the spool at the perfect moment and turn the fish's head.",
+                "You check the line sharply and stop the fish's run.",
+                "You snub the line and force the fish to turn.",
+                "You check the spool late, but slow the fish down.",
+                "You snub the line just before the fish can take more of it.",
+            ),
+        }
+        lines = messages.get(action, messages["reel"])
         return lines[bucket - 1]
 
     @staticmethod
@@ -1885,7 +1985,7 @@ class MUDSession:
         if self.player:
             player_name = self.player.name
             self.player.clear_slick_visit()
-            self.game.commands.release_ancient_whiskers(self.player)
+            self.game.commands.release_unique_fish(self.player)
             
             # Remove from room
             room = self.game.rooms.get(self.player.current_room)

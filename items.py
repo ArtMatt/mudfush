@@ -20,6 +20,7 @@ class ItemType(Enum):
     TOOLKIT = "toolkit"
     BEER = "beer"
     GEM = "gem"
+    SHARD = "shard"
     MISC = "misc"
 
 
@@ -58,6 +59,8 @@ INVENTORY_TYPE_FILTERS = {
     "beers": ItemType.BEER,
     "gem": ItemType.GEM,
     "gems": ItemType.GEM,
+    "shard": ItemType.SHARD,
+    "shards": ItemType.SHARD,
     "container": ItemType.CONTAINER,
     "containers": ItemType.CONTAINER,
     "box": ItemType.CONTAINER,
@@ -215,6 +218,36 @@ def colorize_fish_species(fish_id: str, name: str) -> str:
         return name
     return f"{color}{name}{_ANSI_RESET}"
 
+def is_ancient_fish_id(item_id: str) -> bool:
+    return item_id == "ancient_whiskers" or item_id.startswith("ancient_")
+
+
+def ancient_base_fish_id(item_id: str) -> str:
+    if item_id == "ancient_whiskers":
+        return "legendary_carp"
+    if item_id.startswith("ancient_"):
+        return item_id[len("ancient_"):]
+    return item_id
+
+
+def colorize_ancient_fish(item_id: str, name: str) -> str:
+    """Teal Ancient title followed by the species' normal ANSI color."""
+    species_name = (
+        "Whiskers"
+        if item_id == "ancient_whiskers"
+        else name.removeprefix("Ancient ")
+    )
+    ancient = f"\033[36mAncient{_ANSI_RESET}"
+    color_id = (
+        "ancient_whiskers"
+        if item_id == "ancient_whiskers"
+        else ancient_base_fish_id(item_id)
+    )
+    species = colorize_fish_species(
+        color_id, species_name
+    )
+    return f"{ancient} {species}"
+
 ATTRIBUTES = (
     "strength",
     "dexterity",
@@ -259,6 +292,11 @@ GEM_DISPLAY_NAMES = {
     "intelligence": "blue gem",
     "wisdom": "purple gem",
     "charisma": "pink gem",
+}
+
+SHARD_DISPLAY_NAMES = {
+    attribute: name.replace("gem", "shard")
+    for attribute, name in GEM_DISPLAY_NAMES.items()
 }
 
 
@@ -393,6 +431,7 @@ class Item:
     modifiers: List[Tuple[str, int]] = field(default_factory=list)
     fish_size: Optional[str] = None
     gem_attribute: Optional[str] = None  # For gems: which attribute they enhance
+    shard_progress: int = 0  # For shards: percentage toward becoming a gem
     attracts_fish_id: Optional[str] = None  # Specialty lure target species
     lure_essence: float = 0.0  # Sacrificed weight feeding a specialty lure
 
@@ -489,6 +528,10 @@ class Item:
             return self.name
         if self.item_type == ItemType.GEM:
             return self.name
+        if self.item_type == ItemType.SHARD:
+            return f"{self.name} ({self.shard_progress}%)"
+        if self.item_type == ItemType.FISH and is_ancient_fish_id(self.id):
+            return self.name
         size = f"{self.fish_size} " if self.fish_size else ""
         base = f"{self.condition_name} {size}{self.name}"
         return f"{base}{self._modifier_suffix(colored=False)}"
@@ -504,6 +547,11 @@ class Item:
         if self.item_type == ItemType.GEM:
             attr = self.gem_attribute
             return colorize_attribute(attr, self.name)
+        if self.item_type == ItemType.SHARD:
+            name = colorize_attribute(self.gem_attribute, self.name)
+            return f"{name} ({self.shard_progress}%)"
+        if self.item_type == ItemType.FISH and is_ancient_fish_id(self.id):
+            return colorize_ancient_fish(self.id, self.name)
         if self.fish_size:
             size = f"{colorize_fish_size(self.fish_size)} "
         else:
@@ -517,9 +565,11 @@ class Item:
     def matches(self, query: str) -> bool:
         """True if query matches id, base name, or display name."""
         q = query.lower()
+        normalized = q.replace(" ", "_")
         plain = self.plain_display_name.lower()
         return (
             q == self.id
+            or normalized == self.id
             or q in self.name.lower()
             or q in plain
         )
@@ -635,6 +685,18 @@ GOLDEN_LURE = Item(
     description="A legendary golden lure said to attract the biggest fish.",
     item_type=ItemType.LURE,
     value=100,
+    attraction=5,
+)
+
+GLOWING_LURE = Item(
+    id="glowing_lure",
+    name="glowing lure",
+    description=(
+        "A lost golden lure glowing with three distinct colors. Cliff might "
+        "be able to salvage the light trapped inside it."
+    ),
+    item_type=ItemType.LURE,
+    value=0,
     attraction=5,
 )
 
@@ -934,7 +996,7 @@ BEER = Item(
 )
 
 # Items that shops will never buy or sell
-UNSELLABLE_TYPES = frozenset({ItemType.BEER, ItemType.GEM})
+UNSELLABLE_TYPES = frozenset({ItemType.BEER, ItemType.GEM, ItemType.SHARD})
 GEMMABLE_TYPES = frozenset({
     ItemType.FISHING_POLE,
     ItemType.LURE,
@@ -973,6 +1035,26 @@ def create_gem(attribute: Optional[str] = None) -> Item:
         value=0,
         condition=9,
         gem_attribute=attr,
+    )
+
+def create_shard(attribute: str, progress: int = 20) -> Item:
+    """Create a colored shard holding progress toward an attribute gem."""
+    if attribute not in ATTRIBUTES:
+        raise ValueError(f"Unknown shard attribute: {attribute}")
+    color = ATTRIBUTE_COLOR_NAMES[attribute]
+    return Item(
+        id=f"shard_{attribute}",
+        name=SHARD_DISPLAY_NAMES[attribute],
+        description=(
+            f"A {color} sliver of crystallized lure-light. At 100%, it will "
+            f"become a {color} gem tied to {attribute}."
+        ),
+        item_type=ItemType.SHARD,
+        takeable=True,
+        value=0,
+        condition=9,
+        gem_attribute=attribute,
+        shard_progress=max(0, min(100, int(progress))),
     )
 
 
@@ -1041,8 +1123,6 @@ CATCHABLE_FISH = [
 FISH_SPECIES_SORT_ORDER = {
     fish.id: index for index, (fish, _) in enumerate(CATCHABLE_FISH)
 }
-FISH_SPECIES_SORT_ORDER["ancient_whiskers"] = len(CATCHABLE_FISH)
-
 FISH_SIZE_SORT_ORDER = {
     "trophy": 0,
     "large": 1,
@@ -1054,10 +1134,12 @@ FISH_SIZE_SORT_ORDER = {
 
 def fish_inventory_sort_key(item: Item) -> tuple:
     """Species (catch table order), then quality high-to-low, then size big-to-small."""
-    species = FISH_SPECIES_SORT_ORDER.get(item.id, 999)
+    base_id = ancient_base_fish_id(item.id)
+    species = FISH_SPECIES_SORT_ORDER.get(base_id, 999)
+    ancient = 1 if is_ancient_fish_id(item.id) else 0
     size_name = (item.fish_size or "").lower()
     size = FISH_SIZE_SORT_ORDER.get(size_name, 5)
-    return (species, -item.condition, size, -float(item.weight or 0.0))
+    return (species, ancient, -item.condition, size, -float(item.weight or 0.0))
 
 # Items available in the store
 STORE_INVENTORY = {
@@ -1127,14 +1209,20 @@ def create_item_copy(
         modifiers=mods,
         fish_size=item.fish_size,
         gem_attribute=item.gem_attribute,
+        shard_progress=item.shard_progress,
         attracts_fish_id=item.attracts_fish_id,
         lure_essence=item.lure_essence,
     )
 
 
-def create_mouth_hooked_golden_lure() -> Item:
-    """A new golden lure with three distinct +1 attribute bonuses."""
-    lure = create_item_copy(GOLDEN_LURE, roll_stats=False, condition=9)
+def create_glowing_lure() -> Item:
+    """A mouth-found glowing lure with three distinct +1 bonuses."""
+    lure = create_item_copy(GLOWING_LURE, roll_stats=False, condition=9)
     attrs = random.sample(list(ATTRIBUTES), 3)
     lure.set_modifiers([(attr, 1) for attr in attrs])
     return lure
+
+
+# Backward-compatible import for older callers and saves/tests.
+def create_mouth_hooked_golden_lure() -> Item:
+    return create_glowing_lure()

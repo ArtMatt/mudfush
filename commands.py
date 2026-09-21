@@ -16,9 +16,10 @@ from items import (
     DEGRADABLE_TYPES, strip_ansi, CONDITION_NAMES, colorize_condition,
     colorize_fish_size, attribute_abbrev, colorize_attribute,
     attribute_color_name, PLASTIC_WORM, create_beer, create_gem,
-    create_mouth_hooked_golden_lure, UNSELLABLE_TYPES, GEMMABLE_TYPES, SPECIALTY_LURE, LURE_FORBIDDEN_SPECIES,
+    create_glowing_lure, create_shard, UNSELLABLE_TYPES, GEMMABLE_TYPES,
+    SPECIALTY_LURE, LURE_FORBIDDEN_SPECIES,
     SPECIALTY_LURE_MAX_MULT, attuned_lure_name, attuned_lure_description,
-    specialty_lure_essence_from_fish,
+    specialty_lure_essence_from_fish, is_ancient_fish_id,
 )
 from market import (
     BubbaFishQuest,
@@ -40,7 +41,7 @@ SLICK_WORM_DEAL_COUNT = 3
 SLICK_DEAL_YES = frozenset({"yes", "y", "sure", "deal", "ok", "okay", "yeah", "yep"})
 SLICK_DEAL_NO = frozenset({"no", "n", "nah", "nope", "pass"})
 GEM_CATCH_CHANCE = 200  # 1 in 200
-MOUTH_LURE_CATCH_CHANCE = 300  # 1 in 300 — golden lure in a fish's mouth
+MOUTH_LURE_CATCH_CHANCE = 300  # 1 in 300 — glowing lure in a fish's mouth
 
 ATTRIBUTE_ALIASES = {
     "str": "strength",
@@ -187,6 +188,7 @@ class GameCommands:
         self.norm_rounds: Dict[str, NormRound] = {}
         self.ceelo_tip_handler: Optional[Callable[[Player, int], CommandResult]] = None
         self.ceelo_roll_handler: Optional[Callable[[Player], CommandResult]] = None
+        self.population_cycle: int = 0
         
         # Command mapping
         self.commands: Dict[str, Callable] = {
@@ -210,7 +212,9 @@ class GameCommands:
             "use": self.cmd_use,
             "dump": self.cmd_chum,
             "chum": self.cmd_chum,
+            "release": self.cmd_release,
             "feed": self.cmd_feed,
+            "salvage": self.cmd_salvage,
             "inventory": self.cmd_inventory,
             "inv": self.cmd_inventory,
             "i": self.cmd_inventory,
@@ -652,12 +656,12 @@ class GameCommands:
             return CommandResult(f"You're not carrying a '{item_name}'.")
         
         room = self.rooms.get(player.current_room)
-        if item.id == "ancient_whiskers":
+        if is_ancient_fish_id(item.id):
             player.remove_item(item)
             if self.lake_state:
-                self.lake_state.release()
+                self.lake_state.release(item.id)
             message = (
-                "The Ancient Whiskers slaps its tail wildly and flips itself "
+                f"The {item.name} slaps its tail wildly and flips itself "
                 "toward the water. It's GONE!!"
             )
             return CommandResult(
@@ -683,6 +687,8 @@ class GameCommands:
         item = player.find_item(item_name)
         if not item:
             return CommandResult(f"You're not carrying a '{item_name}'.")
+        if item.id == "glowing_lure":
+            return self._salvage_glowing_lure(player, item)
         if item.id == "bucket_of_chum":
             return self.cmd_chum(player, item_name)
         if item.is_specialty_lure():
@@ -698,6 +704,89 @@ class GameCommands:
                 "You need a custom jig before Cliff can dress a fish for you."
             )
         return CommandResult(f"You can't find a use for {item.display_name} here.")
+
+    def cmd_salvage(self, player: Player, item_name: str) -> CommandResult:
+        """Have Cliff salvage a mouth-found glowing lure into colored shards."""
+        if not item_name:
+            return CommandResult("Salvage what?")
+        item = player.find_item(item_name)
+        if not item:
+            return CommandResult(f"You're not carrying a '{item_name}'.")
+        return self._salvage_glowing_lure(player, item)
+
+    def _salvage_glowing_lure(
+        self, player: Player, lure: Item
+    ) -> CommandResult:
+        """Destroy a glowing lure and add 20% to each matching shard."""
+        if player.current_room != "bubba_workshop":
+            return CommandResult(
+                "Cliff salvages glowing lures in the workshop west of "
+                "Bubba's store porch."
+            )
+        if lure.id != "glowing_lure":
+            return CommandResult(
+                'Cliff shakes his head. "Only those glowing lures from a '
+                'fish carry anything I can salvage."'
+            )
+        if player.is_wearing_or_equipped(lure):
+            return CommandResult(
+                "Remove the glowing lure from your line before Cliff salvages it."
+            )
+
+        attributes = list(dict.fromkeys(
+            attr for attr, value in lure.modifiers
+            if attr and value > 0
+        ))
+        if not attributes:
+            return CommandResult(
+                'Cliff turns the lure over. "No light left in this one."'
+            )
+
+        player.remove_item(lure)
+        results = []
+        for attribute in attributes:
+            shard = next(
+                (
+                    item for item in player.inventory
+                    if item.item_type == ItemType.SHARD
+                    and item.gem_attribute == attribute
+                ),
+                None,
+            )
+            old_progress = shard.shard_progress if shard else 0
+            new_progress = old_progress + 20
+            color = attribute_color_name(attribute)
+            if new_progress >= 100:
+                if shard:
+                    player.remove_item(shard)
+                gem = create_gem(attribute)
+                player.add_item(gem)
+                results.append(
+                    f"The {color} shard reaches 100% and hardens into "
+                    f"a {gem.display_name}!"
+                )
+            else:
+                if shard:
+                    shard.shard_progress = new_progress
+                    results.append(
+                        f"The {color} shard grows to {new_progress}%."
+                    )
+                else:
+                    shard = create_shard(attribute, new_progress)
+                    player.add_item(shard)
+                    results.append(f"A {shard.display_name} forms.")
+
+        return CommandResult(
+            message=(
+                "Cliff cracks the glowing lure over a shallow metal dish. "
+                "Its colored light splinters into crystal.\n"
+                + "\n".join(results)
+            ),
+            broadcast=(
+                f"ROOM:{player.current_room}:{player.name} hands Cliff a "
+                "glowing lure. He cracks it over a metal dish."
+            ),
+        )
 
     def cmd_feed(self, player: Player, args: str) -> CommandResult:
         """Sacrifice a fish to attune or strengthen a specialty lure."""
@@ -739,12 +828,20 @@ class GameCommands:
         item_type: Optional[ItemType] = None,
         specialty_lure: bool = False,
     ) -> Optional[Item]:
-        """Find an inventory item, optionally restricted by type."""
+        """Find an inventory item by name/number, optionally restricted by type."""
         query = query.strip()
         if not query:
             return None
-        for item in player.inventory:
-            if not item.matches(query):
+        numbered = query.rstrip(")")
+        candidates = (
+            [player.find_item(numbered)]
+            if numbered.isdigit()
+            else player.inventory
+        )
+        for item in candidates:
+            if item is None:
+                continue
+            if not numbered.isdigit() and not item.matches(query):
                 continue
             if specialty_lure and not item.is_specialty_lure():
                 continue
@@ -804,7 +901,7 @@ class GameCommands:
             )
         if fish.item_type != ItemType.FISH:
             return CommandResult("Cliff only wants a fish.")
-        if fish.id in LURE_FORBIDDEN_SPECIES:
+        if fish.id in LURE_FORBIDDEN_SPECIES or is_ancient_fish_id(fish.id):
             return CommandResult(
                 'Cliff backs up a step. "I don\'t put that one on a jig. '
                 'You keep it."'
@@ -891,12 +988,108 @@ class GameCommands:
         return CommandResult(
             message=(
                 "You dump the bucket of chum into the water. An oily slick "
-                f"spreads across the surface, drawing in more fish. "
-                f"(Population +{gain} until the lake shifts.)"
+                "spreads across the surface, drawing in more fish."
             ),
             broadcast=(
                 f"ROOM:{room.id}:{player.name} dumps a bucket of chum into "
                 "the water. An oily slick spreads across the surface."
+            ),
+        )
+
+    _RELEASE_FORBIDDEN_IDS = frozenset({"legendary_carp", "ancient_whiskers"})
+
+    @staticmethod
+    def _release_population_gain(fish: Item) -> int:
+        """10–20 from quality and weight. Weight above 10 lb does not help."""
+        condition = max(0, min(9, fish.condition))
+        weight = max(0.0, float(fish.weight or 0.0))
+        return min(20, 10 + int(condition * 0.5 + min(weight, 10.0) * 0.5 + 0.5))
+
+    @staticmethod
+    def _release_constitution_needed(population: int) -> int:
+        """Deeper, colder wades as the water gets livelier."""
+        if population <= 50:
+            return 0
+        if population <= 60:
+            return 3
+        if population <= 70:
+            return 5
+        if population <= 80:
+            return 7
+        if population <= 90:
+            return 9
+        return 11
+
+    def cmd_release(self, player: Player, item_name: str) -> CommandResult:
+        """Pay the lake by releasing a fish; the commotion draws others."""
+        if not item_name.strip():
+            return CommandResult("Release what?")
+        fish = self._find_typed_item(
+            player, item_name, item_type=ItemType.FISH
+        ) or player.find_item(item_name)
+        if not fish or fish.item_type != ItemType.FISH:
+            query = item_name.strip().rstrip(")")
+            if query.isdigit():
+                return CommandResult(
+                    f"You don't have an item numbered {query} in your inventory."
+                )
+            return CommandResult(f"You're not carrying a '{item_name}'.")
+
+        room = self.rooms.get(player.current_room)
+        if not room or not room.is_water:
+            return CommandResult("You need to be at the water to pay the lake.")
+
+        if (
+            fish.id in self._RELEASE_FORBIDDEN_IDS
+            or is_ancient_fish_id(fish.id)
+        ):
+            return CommandResult(
+                f"{fish.name} isn't yours to spend."
+            )
+
+        if player.last_fish_release_cycle == self.population_cycle:
+            return CommandResult(
+                "The water is still settling from your last release."
+            )
+
+        population = room.population or 0
+        if population >= 100:
+            return CommandResult(
+                "This water is already teeming. You keep the fish."
+            )
+
+        needed = self._release_constitution_needed(population)
+        constitution = player.get_effective_attribute("constitution")
+        if constitution < needed:
+            return CommandResult(
+                "The water's too lively. You haven't the constitution to "
+                f"wade out far enough for a real release. (Need {needed} CON.)"
+            )
+
+        gain = self._release_population_gain(fish)
+        room.population = min(100, population + gain)
+        player.remove_item(fish)
+        player.last_fish_release_cycle = self.population_cycle
+
+        if population <= 50:
+            action = (
+                f"You pay the lake with a {fish.display_name}. You wade the "
+                "shallows and turn it loose. It tears off through the open "
+                "water, and others come to look."
+            )
+        else:
+            action = (
+                f"You wade deeper into the cold, wrestle a {fish.display_name} "
+                "through the boil, and turn it loose. The panic runs through "
+                "the school."
+            )
+        if fish.id == "sting_puffer":
+            action += " It puffs once and bolts."
+        return CommandResult(
+            message=action,
+            broadcast=(
+                f"ROOM:{room.id}:{player.name} releases a fish back into the "
+                "water. It tears off in a panic."
             ),
         )
     
@@ -912,19 +1105,27 @@ class GameCommands:
             )
         return CommandResult(player.get_inventory_display(args))
 
-    def release_ancient_whiskers(self, player: Player) -> bool:
-        """Return a held or in-flight Ancient Whiskers to the catch pool."""
+    def release_unique_fish(self, player: Player) -> bool:
+        """Return all held or in-flight ancient fish to their catch pools."""
         held = [
             item for item in player.inventory
-            if item.id == "ancient_whiskers"
+            if is_ancient_fish_id(item.id)
         ]
-        reserved = player.ancient_whiskers_reserved
+        reserved_ids = set(player.reserved_unique_fish_ids)
+        if player.ancient_whiskers_reserved:
+            reserved_ids.add("ancient_whiskers")
         for item in held:
             player.remove_item(item)
         player.ancient_whiskers_reserved = False
-        if (held or reserved) and self.lake_state:
-            self.lake_state.release()
-        return bool(held or reserved)
+        player.reserved_unique_fish_ids.clear()
+        if self.lake_state:
+            for item_id in {item.id for item in held} | reserved_ids:
+                self.lake_state.release(item_id)
+        return bool(held or reserved_ids)
+
+    def release_ancient_whiskers(self, player: Player) -> bool:
+        """Backward-compatible name for returning any ancient fish."""
+        return self.release_unique_fish(player)
     
     def cmd_examine(self, player: Player, target: str) -> CommandResult:
         """Examine an item or object."""
@@ -1043,8 +1244,11 @@ class GameCommands:
         lines = [
             f"\n{item.plain_display_name.upper()}",
             item.description,
-            f"Condition: {item.colored_condition_name} ({item.condition}/9)",
         ]
+        if not is_ancient_fish_id(item.id):
+            lines.append(
+                f"Condition: {item.colored_condition_name} ({item.condition}/9)"
+            )
         if item.modifiers:
             for attr, val in item.modifiers:
                 lines.append(
@@ -1056,12 +1260,28 @@ class GameCommands:
                 f"Gem power: {colorize_attribute(attr, attribute_abbrev(attr))} "
                 f"({attr})"
             )
+        if item.item_type == ItemType.SHARD and item.gem_attribute:
+            attr = item.gem_attribute
+            lines.append(
+                f"Gem progress: {item.shard_progress}% "
+                f"{colorize_attribute(attr, attribute_abbrev(attr))} ({attr})"
+            )
         if item.wear_slot:
             lines.append(f"Wear slot: {item.wear_slot.value}")
         if item.item_type == ItemType.FISHING_POLE:
             lines.append(f"Fishing power: {item.fishing_power}")
         if item.item_type in (ItemType.LURE, ItemType.BAIT):
             lines.append(f"Attraction: {item.attraction}")
+        if item.id == "glowing_lure":
+            colors = ", ".join(
+                attribute_color_name(attr)
+                for attr, value in item.modifiers
+                if value > 0
+            )
+            lines.append(
+                f"Salvage glow: {colors}. Cliff can turn each color into "
+                "20% of a shard."
+            )
         if item.is_specialty_lure():
             if item.attracts_fish_id:
                 species = self._fish_species_by_id(item.attracts_fish_id)
@@ -1339,6 +1559,20 @@ class GameCommands:
                 return item
         return None
 
+    def _iter_repairable_items(self, player: Player):
+        """Worn gear, then equipped pole/lure, then carried inventory order."""
+        for slot in ("head", "neck", "chest", "hands", "fingers", "legs", "feet"):
+            item = player.worn_items.get(slot)
+            if item and item.can_be_repaired():
+                yield item
+        if player.equipped_pole and player.equipped_pole.can_be_repaired():
+            yield player.equipped_pole
+        if player.equipped_lure and player.equipped_lure.can_be_repaired():
+            yield player.equipped_lure
+        for item in player.get_inventory_display_order():
+            if item.can_be_repaired():
+                yield item
+
     def _format_repairable_list(self, player: Player) -> str:
         """Show worn and carried items a toolkit could restore to new."""
         equip_lines = []
@@ -1370,7 +1604,7 @@ class GameCommands:
         if carried_lines:
             lines.append("\nCarried:")
             lines.extend(carried_lines)
-        lines.append("\nType 'repair <item>' or 'repair <#>'.")
+        lines.append("\nType 'repair <item>', 'repair <#>', or 'repair next'.")
         return "\n".join(lines)
 
     def cmd_repair(self, player: Player, item_name: str) -> CommandResult:
@@ -1378,9 +1612,15 @@ class GameCommands:
         if not item_name:
             return CommandResult(self._format_repairable_list(player))
 
-        target = player.find_item(item_name)
-        if not target:
-            return CommandResult(f"You don't have a '{item_name}'.")
+        query = item_name.strip().lower()
+        if query == "next":
+            target = next(self._iter_repairable_items(player), None)
+            if not target:
+                return CommandResult("Nothing you carry needs repairing.")
+        else:
+            target = player.find_item(item_name)
+            if not target:
+                return CommandResult(f"You don't have a '{item_name}'.")
 
         if target.item_type == ItemType.FISH:
             return CommandResult("You can't repair a fish.")
@@ -1539,6 +1779,8 @@ class GameCommands:
                 "\n" + "\n".join(degrade_msgs) if degrade_msgs else ""
             )
             player.add_item(fish_copy)
+            if is_ancient_fish_id(fish_copy.id):
+                player.reserved_unique_fish_ids.discard(fish_copy.id)
             if fish_copy.id == "ancient_whiskers":
                 player.ancient_whiskers_reserved = False
             level_lines = player.record_fish_catch(fish_copy.weight)
@@ -1579,16 +1821,17 @@ class GameCommands:
                     f"{color} into their pocket."
                 )
             if random.randint(1, MOUTH_LURE_CATCH_CHANCE) == 1:
-                lure = create_mouth_hooked_golden_lure()
+                lure = create_glowing_lure()
                 player.add_item(lure)
                 lines.append("")
                 lines.append(
-                    "You notice this fish had a "
+                    "You notice this fish had a glowing "
                     f"{colorize_condition(2, 'lure')} already hooked in its "
-                    "mouth. You carefully remove it."
+                    "mouth. Three colors pulse beneath its golden surface."
                 )
                 lines.append(
-                    "Someone is probably kicking themselves for losing this lure..."
+                    "You carefully remove it. Someone is probably kicking "
+                    "themselves for losing this lure..."
                 )
             if level_lines:
                 lines.append("")
@@ -1641,7 +1884,7 @@ class GameCommands:
         Occasionally land a fish as a lake NPC.
 
         Returns (hook_message, catch_message, reel_seconds) or None on a miss.
-        Never takes Ancient Whiskers out of the pool.
+        Never takes an ancient fish out of the pool.
         """
         room = self.rooms.get(room_id)
         if not room or not room.is_water:
@@ -1746,21 +1989,25 @@ class GameCommands:
             if roll <= cumulative:
                 if (
                     allow_ancient
-                    and fish.id == "legendary_carp"
                     and self.lake_state
-                    and self.lake_state.available
-                    and random.randint(1, 100) == 1
-                    and self.lake_state.reserve()
+                    and self.lake_state.is_available(fish.id)
+                    and random.randint(
+                        1, self.lake_state.rarity(fish.id)
+                    ) == 1
+                    and self.lake_state.reserve(fish.id)
                 ):
+                    ancient = self.lake_state.create_catch(fish.id)
                     if player:
-                        player.ancient_whiskers_reserved = True
-                    return self.lake_state.create_catch()
+                        player.reserved_unique_fish_ids.add(ancient.id)
+                        if ancient.id == "ancient_whiskers":
+                            player.ancient_whiskers_reserved = True
+                    return ancient
                 return fish
         return CATCHABLE_FISH[0][0]
 
     def _create_sized_fish(self, fish: Item) -> Item:
         """Create a fish whose rarer size changes its weight and value."""
-        if fish.id == "ancient_whiskers":
+        if is_ancient_fish_id(fish.id):
             caught = create_item_copy(fish)
             caught.fish_size = None
             caught.weight = fish.weight
@@ -1978,7 +2225,12 @@ class GameCommands:
             ),
             "bluegill": "No way, not that boring fish!",
         }
-        skip_line = skip_lines.get(item.id)
+        skip_line = (
+            "WHOA!! I've never seen anything that old! "
+            "I wasn't thinking of that!"
+            if is_ancient_fish_id(item.id)
+            else skip_lines.get(item.id)
+        )
         if skip_line:
             return CommandResult(
                 f"Norm hands back your {item.display_name}.\n"
@@ -2290,6 +2542,8 @@ class GameCommands:
         if kind == "npc":
             if name.lower() == "norm":
                 return self._give_to_norm(player, item)
+            if name.lower() == "cliff" and item.id == "glowing_lure":
+                return self._salvage_glowing_lure(player, item)
             local_fisherman = (
                 self.fishermen.in_room(player.current_room)
                 if self.fishermen else None
@@ -2305,15 +2559,15 @@ class GameCommands:
             if (
                 local_fisherman
                 and name.lower() == local_fisherman.display.lower()
-                and item.id == "ancient_whiskers"
+                and is_ancient_fish_id(item.id)
             ):
                 player.remove_item(item)
                 if self.lake_state:
-                    self.lake_state.release()
+                    self.lake_state.release(item.id)
                 return CommandResult(
                     (
                         f"You offer {item.display_name} to {local_fisherman.display}.\n"
-                        "The fisherman recognizes the old carp immediately and "
+                        "The fisherman recognizes the ancient fish immediately and "
                         "slips it gently back into the lake."
                     ),
                     broadcast=(
@@ -2406,11 +2660,13 @@ ITEMS:
   unequip/uneq/remove/rem [item] - Remove gear (bare removes all worn)
   remove <attr>         - Remove all gear boosting that attribute (e.g. rem con)
   repair/fix [item]     - List worn gear, or repair with a toolkit (Int/Dex)
+  repair/fix next       - Repair the next item that isn't new
   stats/attributes      - Show character attributes and level
 
 FISHING:
   fish/cast           - Cast your line (need pole equipped!)
   consider/con        - Estimate a fishing spot's population
+  release <fish/#>    - Pay the lake; the commotion draws fish (Con)
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
   chum/dump chum       - Use chum to briefly improve this fishing spot
   weather             - Check weather (Int+Wis reveals coming patterns)
@@ -2707,7 +2963,7 @@ TIPS:
         if player.is_wearing_or_equipped(item):
             return CommandResult(self._refuse_equipped_sale(store_type, item))
 
-        if item.id == "ancient_whiskers":
+        if is_ancient_fish_id(item.id):
             if store_type == StoreType.SLICK:
                 return CommandResult(
                     'Slick recoils. "Get that out of here, I have a bad '
@@ -2715,14 +2971,14 @@ TIPS:
                 )
 
             payout = (
-                self.lake_state.payout(item.weight)
+                self.lake_state.payout(item.id, item.weight)
                 if self.lake_state else item.value
             )
             player.remove_item(item)
             player.gold += payout
             player.total_gold_earned += payout
             if self.lake_state:
-                self.lake_state.release(grow=True)
+                self.lake_state.release(item.id, grow=True)
             release_message = (
                 "Bubba quickly weighs the fish and tosses it out of the "
                 "window! It lands in the nearby stream and disappears "
@@ -2731,14 +2987,14 @@ TIPS:
             return CommandResult(
                 message=(
                     '"You\'ve caught the legend. I\'ll pay you well so we can '
-                    'return him to the water."\n'
+                    'return it to the water."\n'
                     f"Bubba pays you {payout} gold. (Your gold: {player.gold})\n"
                     f"{release_message}"
                 ),
                 broadcast=f"ROOM:{room.id}:{release_message}",
             )
 
-        if item.item_type in UNSELLABLE_TYPES:
+        if item.item_type in UNSELLABLE_TYPES or item.id == "glowing_lure":
             if store_type == StoreType.SLICK:
                 return CommandResult(
                     f'Slick waves you off. "I don\'t deal in that kind of '
@@ -2866,13 +3122,13 @@ TIPS:
         player: Optional[Player] = None,
     ) -> Optional[int]:
         """Estimate sell value for an inventory item at a store."""
-        if item.item_type in UNSELLABLE_TYPES:
+        if item.item_type in UNSELLABLE_TYPES or item.id == "glowing_lure":
             return None
-        if item.id == "ancient_whiskers":
+        if is_ancient_fish_id(item.id):
             if store_type == StoreType.SLICK:
                 return None
             return (
-                self.lake_state.payout(item.weight)
+                self.lake_state.payout(item.id, item.weight)
                 if self.lake_state else item.value
             )
         if store_type == StoreType.SLICK and item.is_specialty_lure():
@@ -2920,7 +3176,7 @@ TIPS:
 
         offers = []
         for number, item in enumerate(player.get_inventory_display_order(), start=1):
-            if item.id == "ancient_whiskers":
+            if is_ancient_fish_id(item.id):
                 continue
             price = self._estimate_sell_price(store_type, item, player)
             if price is None:

@@ -13,7 +13,7 @@ from enum import Enum
 from items import (
     Item, ItemType, STORE_INVENTORY, WEARABLE_ITEMS, CONDITION_NAMES,
     colorize_condition, colorize_fish_size, colorize_fish_species,
-    UNSELLABLE_TYPES,
+    UNSELLABLE_TYPES, is_ancient_fish_id,
     BLUEGILL, BASS, CATFISH, TROUT, PIKE, LEGENDARY_CARP,
     MUD_CARP, PEBBLE_PERCH, MOON_DARTER, WALLEYE,
     STING_PUFFER, ZEN_GUPPY,
@@ -460,7 +460,11 @@ class Market:
         charisma: int = 1,
     ) -> Optional[int]:
         """Estimate what a store will pay for a player's item."""
-        if item.item_type in UNSELLABLE_TYPES:
+        if (
+            item.item_type in UNSELLABLE_TYPES
+            or item.id == "glowing_lure"
+            or is_ancient_fish_id(item.id)
+        ):
             return None
         if store == StoreType.BUBBA and item.item_type != ItemType.FISH:
             return None
