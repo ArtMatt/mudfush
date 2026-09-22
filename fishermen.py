@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from camper import FISHING_HOLE_IDS
 from world import Room
 
 
@@ -92,7 +93,8 @@ class FishermanManager:
     def __init__(self, rooms: Dict[str, Room]):
         self.rooms = rooms
         self.fishing_room_ids = [
-            room.id for room in rooms.values() if room.is_water
+            room.id for room in rooms.values()
+            if room.is_water and room.id not in FISHING_HOLE_IDS
         ]
         if len(self.fishing_room_ids) != len(FISHERMEN):
             raise ValueError(

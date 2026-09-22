@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
-from camper import CAMPER_KEY_ID, GarageEngine
+from camper import CAMPER_KEY_ID, FISHING_HOLE_IDS, GarageEngine
 from world import create_world, Room, reset_ground_items, population_shift_message
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
@@ -743,7 +743,7 @@ class FishingMUD:
     async def broadcast_to_fishing_rooms(self, message: str):
         """Announce a message in every room where fishing is possible."""
         for room in self.rooms.values():
-            if room.is_water:
+            if room.is_water and room.id not in FISHING_HOLE_IDS:
                 await self.broadcast_to_room(room.id, message)
     
     async def broadcast_global(self, message: str, exclude: str = None):

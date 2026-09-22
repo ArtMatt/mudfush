@@ -214,15 +214,89 @@ def _has_key(player) -> bool:
 GARAGE_ROOM_ID = "slick_garage"
 CAMPER_ROOM_ID = "camper_interior"
 
+# Pads besides the garage, each with a fishing hole off the east side.
+REMOTE_PADS = (
+    {
+        "id": "alpha_minor",
+        "name": "Alpha Minor Research Pad",
+        "description": (
+            "A quiet research pad on Alpha Minor. The sky is a hard black. "
+            "East of the pad, a chain-link walkway drops toward a dark pool "
+            "that shouldn't be liquid."
+        ),
+        "hole_name": "Alpha Minor Fishing Hole",
+        "hole_description": (
+            "A round basin of black water sits under a grated catwalk. The "
+            "surface is too still, then dimples as if something large turned "
+            "over underneath. You could FISH here, if you wanted to."
+        ),
+    },
+    {
+        "id": "beta_haven",
+        "name": "Beta Haven Spaceport",
+        "description": (
+            "Beta Haven's landing pad. Warm wind rolls off a rust-colored "
+            "plain. East of the tarmac, a ditch holds water the color of "
+            "old pennies."
+        ),
+        "hole_name": "Beta Haven Fishing Hole",
+        "hole_description": (
+            "Copper-stained water fills a cut in the plain. It smells like "
+            "wet metal and algae. Things flick just under the film. You "
+            "could FISH here."
+        ),
+    },
+    {
+        "id": "beta_forge",
+        "name": "Beta Forge Cargo Pad",
+        "description": (
+            "A scarred cargo pad. Furnaces glow on the horizon. East, a "
+            "slag trench has filled with water that steams in the heat."
+        ),
+        "hole_name": "Beta Forge Fishing Hole",
+        "hole_description": (
+            "The slag trench is a fishing hole now, somehow. The water is "
+            "warm and cloudy, and heat-shimmer makes the far bank crawl. "
+            "You could FISH here."
+        ),
+    },
+    {
+        "id": "gamma_reach",
+        "name": "Gamma Reach Spaceport",
+        "description": (
+            "A lonely pad at Gamma Reach. The star here is a cold white pin. "
+            "East, a shallow crater holds a sheet of water that reflects the "
+            "wrong sky."
+        ),
+        "hole_name": "Gamma Reach Fishing Hole",
+        "hole_description": (
+            "The crater pool is glassy and wrong. Your reflection lags a "
+            "half-second behind you. Rings spread from casts that haven't "
+            "happened yet. You could FISH here."
+        ),
+    },
+    {
+        "id": "gamma_ice",
+        "name": "Gamma Ice Outpost",
+        "description": (
+            "Ice underfoot. The outpost is a single heated shack and this "
+            "pad. East, someone has kept a hole chopped in the ice."
+        ),
+        "hole_name": "Gamma Ice Fishing Hole",
+        "hole_description": (
+            "A square hole in the ice, edges glazed from repeated thawing. "
+            "The water below is darker and warmer than it has any right to "
+            "be. You could FISH here."
+        ),
+    },
+)
+
+FISHING_HOLE_IDS = frozenset(f"{pad['id']}_hole" for pad in REMOTE_PADS)
+
 GARAGE_ROOM_IDS = frozenset({
     GARAGE_ROOM_ID,
     CAMPER_ROOM_ID,
-    "alpha_minor",
-    "beta_haven",
-    "beta_forge",
-    "gamma_reach",
-    "gamma_ice",
-})
+}) | {pad["id"] for pad in REMOTE_PADS} | FISHING_HOLE_IDS
 
 
 def place_camper_key(rooms: Dict[str, "Room"]) -> bool:
@@ -272,26 +346,24 @@ def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
             + "\n\nA propped-open door at the back leads south into Slick's garage."
         )
 
-    stops = [
-        ("alpha_minor", "Alpha Minor Research Pad",
-         "A quiet research pad on Alpha Minor. The sky is a hard black."),
-        ("beta_haven", "Beta Haven Spaceport",
-         "Beta Haven's landing pad. Warm wind rolls off a rust-colored plain."),
-        ("beta_forge", "Beta Forge Cargo Pad",
-         "A scarred cargo pad. Furnaces glow on the horizon."),
-        ("gamma_reach", "Gamma Reach Spaceport",
-         "A lonely pad at Gamma Reach. The star here is a cold white pin."),
-        ("gamma_ice", "Gamma Ice Outpost",
-         "Ice underfoot. The outpost is a single heated shack and this pad."),
-    ]
-    for rid, name, desc in stops:
-        rooms[rid] = Room(
-            id=rid,
-            name=name,
-            description=desc,
-            exits={},
+    stops = REMOTE_PADS
+    for pad in stops:
+        hole_id = f"{pad['id']}_hole"
+        rooms[pad["id"]] = Room(
+            id=pad["id"],
+            name=pad["name"],
+            description=pad["description"],
+            exits={"east": hole_id},
             items=[],
             is_water=False,
+        )
+        rooms[hole_id] = Room(
+            id=hole_id,
+            name=pad["hole_name"],
+            description=pad["hole_description"],
+            exits={"west": pad["id"]},
+            items=[],
+            is_water=True,
         )
 
     rooms[CAMPER_ROOM_ID] = Room(

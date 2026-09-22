@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from player import Player, PlayerManager
 from world import Room, DIRECTION_ALIASES
+from camper import FISHING_HOLE_IDS
 from items import (
     Item, ItemType, STORE_INVENTORY, CATCHABLE_FISH, create_item_copy,
     DEGRADABLE_TYPES, strip_ansi, CONDITION_NAMES, colorize_condition,
@@ -2675,7 +2676,10 @@ class GameCommands:
         self, player: Player, fisherman: Fisherman
     ) -> str:
         """Give a charisma-scaled hint about the best current fishing water."""
-        fishing_rooms = [room for room in self.rooms.values() if room.is_water]
+        fishing_rooms = [
+            room for room in self.rooms.values()
+            if room.is_water and room.id not in FISHING_HOLE_IDS
+        ]
         best_population = max((room.population or 0) for room in fishing_rooms)
         best_rooms = [
             room for room in fishing_rooms
