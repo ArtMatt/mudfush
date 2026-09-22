@@ -93,6 +93,7 @@ class Player:
     hack_warnings: int = 0  # Non-standard character offenses
     jail_visits: int = 0  # Times sent to jail
     jail_release_at: float = 0.0  # Unix timestamp when jail exit unlocks
+    wrenching: int = 0  # Garage skill, 0-100
     # Temporary all-attribute modifier from special fish (not from equipment)
     temp_attr_mod: int = 0
     temp_attr_expires_at: float = 0.0
@@ -317,6 +318,7 @@ class Player:
             "hack_warnings": self.hack_warnings,
             "jail_visits": self.jail_visits,
             "jail_release_at": self.jail_release_at,
+            "wrenching": self.wrenching,
             "temp_attr_mod": self.temp_attr_mod,
             "temp_attr_expires_at": self.temp_attr_expires_at,
         }
@@ -395,6 +397,7 @@ class Player:
             hack_warnings=data.get("hack_warnings", 0),
             jail_visits=data.get("jail_visits", 0),
             jail_release_at=data.get("jail_release_at", 0.0),
+            wrenching=int(data.get("wrenching", 0)),
             temp_attr_mod=int(data.get("temp_attr_mod", 0)),
             temp_attr_expires_at=float(data.get("temp_attr_expires_at", 0.0)),
         )

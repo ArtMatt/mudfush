@@ -970,6 +970,18 @@ TACKLE_BOX = Item(
     value=15,
 )
 
+CAMPER_KEY = Item(
+    id="camper_key",
+    name="small padlock key",
+    description=(
+        "A stubby key on a bent bottle-opener fob. The brass is worn "
+        "smooth and someone scratched a G into it."
+    ),
+    item_type=ItemType.MISC,
+    takeable=True,
+    value=0,
+)
+
 OLD_BOOT = Item(
     id="old_boot",
     name="old boot",

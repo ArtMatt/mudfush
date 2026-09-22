@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
+from camper import GarageEngine
 from world import create_world, Room, reset_ground_items, population_shift_message
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
@@ -78,6 +79,8 @@ class FishingMUD:
             lake_state=self.lake_state,
             fishermen=self.fishermen,
         )
+        self.garage = GarageEngine(self.rooms)
+        self.commands.garage = self.garage
         self.commands.ceelo_tip_handler = self.join_ceelo
         self.commands.ceelo_roll_handler = self.roll_ceelo
         self.sessions: Dict[str, 'MUDSession'] = {}  # player_name -> session
@@ -87,6 +90,7 @@ class FishingMUD:
         self._ground_loot_task = None
         self._scavenger_task = None
         self._clothing_degrade_task = None
+        self._garage_task = None
         self._fisherman_fish_tasks = []
         self._npc_fishing: Set[str] = set()
         self._fishermen_relocating = False
@@ -609,6 +613,32 @@ class FishingMUD:
             f"Clothing degrade started (every {interval // 60} minutes)"
         )
 
+    async def start_garage_updates(self, interval: int = 1):
+        """Tick the back-garage project and relay whatever it reports."""
+        async def garage_loop():
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    notes = self.garage.update()
+                except Exception:
+                    logger.exception("Garage tick failed")
+                    continue
+                for note in notes:
+                    await self.broadcast_to_room(note.room_id, note.message)
+                while self.garage.eject_queue:
+                    name, room_id = self.garage.eject_queue.pop(0)
+                    session = self.sessions.get(name)
+                    if not session or not session.player:
+                        continue
+                    session.player.current_room = room_id
+                    room = self.rooms.get(room_id)
+                    if room:
+                        await session.send_message(
+                            "\n" + room.get_description(current_player=name) + "\n> "
+                        )
+
+        self._garage_task = asyncio.create_task(garage_loop())
+
     async def run_clothing_degrade(self) -> int:
         """Degrade marked worn clothes for all online players."""
         affected = 0
@@ -678,6 +708,9 @@ class FishingMUD:
         if self._clothing_degrade_task:
             self._clothing_degrade_task.cancel()
             self._clothing_degrade_task = None
+        if self._garage_task:
+            self._garage_task.cancel()
+            self._garage_task = None
         if self._fisherman_fish_tasks:
             for task in self._fisherman_fish_tasks:
                 task.cancel()
@@ -995,6 +1028,7 @@ Admin console commands:
         self.commands.rooms = self.rooms
         self.fishermen = FishermanManager(self.rooms)
         self.commands.fishermen = self.fishermen
+        self.garage.rooms = self.rooms
 
         moved = []
         for player, room_id in placements:
@@ -2115,6 +2149,7 @@ async def start_server(host: str = '0.0.0.0', port: int = 2222):
     await game.start_ground_loot_resets(interval=3600)  # Ground items every hour
     await game.start_scavenger_cleanup(interval=10800)  # Clear clutter every 3 hours
     await game.start_clothing_degrade(interval=1800)  # Worn clothes every 30 min
+    await game.start_garage_updates(interval=1)
     await game.start_fisherman_fishing()
     admin_task = asyncio.create_task(run_admin_console(game))
     

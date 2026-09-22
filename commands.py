@@ -92,6 +92,13 @@ NPC_DESCRIPTIONS = {
         "Cliff's young son is crouched in the grass, arranging pebbles and "
         "fish-shaped sticks into a game only he understands."
     ),
+    "gus": (
+        "\nGUS\n"
+        "A heavy-set old man asleep in a lawn chair with a cap over his "
+        "eyes. His knuckles are permanently grease-stained. He claims he "
+        "can fix anything with wheels, given enough time and nobody "
+        "watching."
+    ),
     "curt": (
         "\nCURT\n"
         "A broad, quiet man in rolled shirtsleeves sits behind a scarred "
@@ -187,6 +194,7 @@ class GameCommands:
         self.market = market
         self.lake_state = lake_state
         self.fishermen = fishermen
+        self.garage = None  # GarageEngine, set by the server if enabled
         self.norm_rounds: Dict[str, NormRound] = {}
         self.ceelo_tip_handler: Optional[Callable[[Player, int], CommandResult]] = None
         self.ceelo_roll_handler: Optional[Callable[[Player], CommandResult]] = None
@@ -316,7 +324,12 @@ class GameCommands:
         # Check for direction shortcuts
         if command in DIRECTION_ALIASES:
             return self.cmd_go(player, DIRECTION_ALIASES[command])
-        
+
+        if self.garage:
+            handled = self.garage.handle(player, command, args, CommandResult)
+            if handled is not None:
+                return handled
+
         return CommandResult(f"Unknown command: '{command}'. Type 'help' for a list of commands.")
 
     def _accept_slick_worm_deal(self, player: Player) -> CommandResult:
@@ -456,12 +469,15 @@ class GameCommands:
     def _room_description(self, player: Player, room: Room) -> str:
         """Render Slick's west door only for players who have unlocked it."""
         description = room.get_description(current_player=player.name)
+        if self.garage:
+            description += self.garage.describe_ships_here(room.id)
         if room.id != "slick_store" or not player.ceelo_access_unlocked:
             return description
+        exits = list(room.exits.keys())
         description = description.replace(
-            "\nExits: [north]",
+            f"\nExits: [{', '.join(exits)}]",
             "\nA door marked EMPLOYEES ONLY stands open to the west."
-            "\n\nExits: [north, west]",
+            f"\n\nExits: [{', '.join(exits + ['west'])}]",
         )
         return description
 
@@ -2972,7 +2988,7 @@ ITEMS:
   wear all              - Wear clothing into empty slots
   unequip/uneq/remove/rem [item] - Remove gear (bare removes all worn)
   remove <attr>         - Remove all gear boosting that attribute (e.g. rem con)
-  repair/fix [item]     - List worn gear, or repair with a toolkit (Int/Dex)
+  repair/fix [item]     - List worn gear, or repair with a toolkit
   repair/fix next       - Repair the next item that isn't new
                           (in jail you can mend by hand, 3× slower)
   stats/attributes      - Show character attributes and level
@@ -2982,11 +2998,11 @@ FISHING:
   ponder              - Review your heaviest catch of each kind
   brag <fish>         - Boast a personal-best weight to the room
   consider/con        - Estimate a fishing spot's population
-  sense <fish>        - Feel how likely a species is (Int+Wis)
-  release <fish/#>    - Pay the lake; the commotion draws fish (Con)
+  sense <fish>        - Feel how likely a species is
+  release <fish/#>    - Pay the lake; the commotion draws fish
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
   chum/dump chum       - Use chum to briefly improve this fishing spot
-  weather             - Check weather (Int+Wis reveals coming patterns)
+  weather             - Check weather
   (While reeling: type CUT or press Ctrl-G to snap the line)
 
 SHOPPING (at Bubba's or Slick's):

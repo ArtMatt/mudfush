@@ -7,6 +7,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+from camper import GARAGE_ROOM_IDS, add_garage_to_world
 from items import (
     Item, TACKLE_BOX, OLD_BOOT, PLASTIC_WORM, NIGHTCRAWLERS,
     MINNOWS, WEARABLE_ITEMS, create_item_copy,
@@ -16,7 +17,7 @@ from items import (
 # Rooms that never get random ground loot
 NO_GROUND_LOOT_ROOMS = frozenset({
     "store", "slick_store", "slick_backroom", "jail", "bubba_workshop",
-})
+}) | GARAGE_ROOM_IDS
 
 # Common ground finds (item template, relative weight)
 COMMON_GROUND_LOOT: List[Tuple[Item, int]] = [
@@ -435,6 +436,7 @@ The smell of old fish bait somehow still finds its way in here.""",
         is_water=False,
     )
 
+    add_garage_to_world(rooms)
     reset_ground_items(rooms)
     return rooms
 
