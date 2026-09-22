@@ -980,6 +980,7 @@ CAMPER_KEY = Item(
     item_type=ItemType.MISC,
     takeable=True,
     value=0,
+    condition=4,  # reads as "worn", which is all a key ever is
 )
 
 OLD_BOOT = Item(

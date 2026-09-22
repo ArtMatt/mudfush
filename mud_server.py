@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
-from camper import GarageEngine
+from camper import CAMPER_KEY_ID, GarageEngine
 from world import create_world, Room, reset_ground_items, population_shift_message
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
@@ -674,12 +674,14 @@ class FishingMUD:
         for room in self.rooms.values():
             if not room.items:
                 continue
-            had_items = True
+            # The scavenger has no use for a key to someone else's junk.
+            spared = [item for item in room.items if item.id == CAMPER_KEY_ID]
+            if len(spared) == len(room.items):
+                continue
             if room.players:
                 await self.broadcast_to_room(room.id, message)
-            room.items.clear()
-            if had_items:
-                cleared += 1
+            room.items = spared
+            cleared += 1
         return cleared
     
     def stop_autosave(self):

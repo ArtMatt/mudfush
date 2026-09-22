@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from camper import GARAGE_ROOM_IDS, add_garage_to_world
+from camper import GARAGE_ROOM_IDS, add_garage_to_world, place_camper_key
 from items import (
     Item, TACKLE_BOX, OLD_BOOT, PLASTIC_WORM, NIGHTCRAWLERS,
     MINNOWS, WEARABLE_ITEMS, create_item_copy,
@@ -182,6 +182,8 @@ def reset_ground_items(rooms: Dict[str, Room]) -> Dict[str, int]:
         clothing = random.choice(list(WEARABLE_ITEMS.values()))
         room.items.append(create_item_copy(clothing))
         clothing_count += 1
+
+    place_camper_key(rooms)
 
     return {"common": common_count, "clothing": clothing_count}
 

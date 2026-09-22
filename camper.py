@@ -54,6 +54,7 @@ RENT_GOLD = 5             # Gus charges a little for the gas
 TRAINER_ADEPT = 20        # the most Gus can teach you
 TRAIN_COST = 2            # gold per practice session
 CAMPER_KEY_ID = "camper_key"
+CAMPER_KEY_ROOM = "slick_backroom"  # where a spare key keeps turning up
 LAUNCH_FUEL = 100         # energy burned pulling out
 LAND_FUEL = 25
 HYPER_FUEL = 100
@@ -245,6 +246,25 @@ GARAGE_ROOM_IDS = frozenset({
     "gamma_reach",
     "gamma_ice",
 })
+
+
+def place_camper_key(rooms: Dict[str, "Room"]) -> bool:
+    """
+    Leave a padlock key on the floor of Slick's back room.
+
+    Called on every ground-loot reset, so the key comes back after someone
+    pockets it. The back room is already gated behind Curt, which is as much
+    of a lock as the key itself needs.
+    """
+    from items import CAMPER_KEY, create_item_copy
+
+    room = rooms.get(CAMPER_KEY_ROOM)
+    if room is None:
+        return False
+    if any(item.id == CAMPER_KEY_ID for item in room.items):
+        return False
+    room.items.append(create_item_copy(CAMPER_KEY, roll_stats=False, condition=4))
+    return True
 
 
 def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
