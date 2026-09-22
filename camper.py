@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 class ShipState(str, Enum):
     DOCKED = "docked"
     READY = "ready"
+    ORBIT = "orbit"
     BUSY = "busy"
     BUSY_2 = "busy_2"
     BUSY_3 = "busy_3"
@@ -50,14 +51,10 @@ class ShipState(str, Enum):
 
 
 LAND_RANGE = 200          # how close you must be to set down
-RENT_GOLD = 5             # Gus charges a little for the gas
-TRAINER_ADEPT = 20        # the most Gus can teach you
-TRAIN_COST = 2            # gold per practice session
+ORBIT_RANGE = 200         # snap into orbit this close to a planet
+RENT_GOLD = 5             # a little to take the public Airstream out
 CAMPER_KEY_ID = "camper_key"
 CAMPER_KEY_ROOM = "slick_backroom"  # where a spare key keeps turning up
-LAUNCH_FUEL = 100         # energy burned pulling out
-LAND_FUEL = 25
-HYPER_FUEL = 100
 
 
 class Broadcast:
@@ -146,8 +143,6 @@ class Ship:
     currspeed: int = 0
     realspeed: int = 200
     hyperspeed: int = 100
-    energy: int = 10000
-    maxenergy: int = 10000
     hull: int = 500
     maxhull: int = 500
     shield: int = 0
@@ -165,6 +160,7 @@ class Ship:
     autopilot: bool = False
     target: Optional["Ship"] = None
     home: str = ""
+    orbit: Optional[str] = None  # planet name while held in orbit
 
     def matches(self, name: str) -> bool:
         needle = name.strip().lower()
@@ -206,28 +202,9 @@ def _facing(ship: Ship, target: Ship) -> bool:
     return (dx / mag) * (ship.hx / hmag) + (dy / mag) * (ship.hy / hmag) + (dz / mag) * (ship.hz / hmag) > 0.3
 
 
-def _skill(player) -> int:
-    return int(getattr(player, "wrenching", 0) or 0)
-
-
-def _set_skill(player, value: int) -> None:
-    player.wrenching = max(0, min(100, int(value)))
-
-
 def _has_key(player) -> bool:
     """True if the player is carrying the camper's padlock key."""
     return any(item.id == CAMPER_KEY_ID for item in getattr(player, "inventory", []))
-
-
-def _learn(player, success: bool) -> None:
-    """Practice pays off a little at a time, win or lose."""
-    skill = _skill(player)
-    if skill >= 100:
-        return
-    if success:
-        _set_skill(player, skill + random.randint(1, 4))
-    elif random.randint(1, 100) < 30:
-        _set_skill(player, skill + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +257,7 @@ def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
             "stains. Taking up most of the bay is a broken-down Airstream "
             "camper up on blocks, its aluminum skin dented and hazed gray. "
             "A heavy padlock hangs through the door latch.\n\n"
-            "Gus dozes in a lawn chair beside it. He says he'll let you "
-            "PRACTICE WRENCHING on the old thing if you're bored."
+            "Gus dozes in a lawn chair beside it."
         ),
         exits={"north": "slick_store"},
         items=[],
@@ -326,8 +302,12 @@ def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
             "single wrap-around console. Pilot, navigation, sensor, and "
             "weapons controls share the panel where a fold-down table used "
             "to be. The windows are shuttered.\n\n"
-            "There is no door to walk through — use LEAVESHIP once you have "
-            "set down and opened the hatch."
+            "A strip of masking tape names the surviving buttons: "
+            "LAUNCH (LAU), ACCELERATE (ACC), CALCULATE (CAL), "
+            "HYPERSPACE (HYP), LAND (LAN), RADAR (RAD), and STATUS (STA). "
+            "You might want to try hitting them.\n\n"
+            "There is no door to walk through. Once you've set down and "
+            "opened up, LEAVE (LEA)."
         ),
         exits={},
         items=[],
@@ -461,6 +441,7 @@ class GarageEngine:
         self._move_ships(notes)
         if self._ticks % 2 == 0:
             self._update_space(notes)
+        self._apply_orbits(notes)
         return notes
 
     def _echo_cockpit(self, ship: Ship, message: str, notes: List[Broadcast]) -> None:
@@ -483,8 +464,59 @@ class GarageEngine:
             ship.vx += dx * (ship.currspeed / 5)
             ship.vy += dy * (ship.currspeed / 5)
             ship.vz += dz * (ship.currspeed / 5)
-            if ship.energy > 0:
-                ship.energy = max(0, ship.energy - max(1, ship.currspeed // 50))
+
+    def _apply_orbits(self, notes: List[Broadcast]) -> None:
+        """Hold a ship on a planet once it comes within ORBIT_RANGE."""
+        skip = (
+            ShipState.DOCKED, ShipState.DISABLED,
+            ShipState.LAUNCH, ShipState.LAUNCH_2,
+            ShipState.LAND, ShipState.LAND_2,
+            ShipState.HYPERSPACE,
+        )
+        for ship in self.ships:
+            if ship.state in skip or not ship.starsystem:
+                continue
+            bound = None
+            if ship.orbit:
+                bound = next(
+                    (planet for planet in ship.starsystem.planets if planet.name == ship.orbit),
+                    None,
+                )
+                if bound is None or _distance(
+                    ship.vx, ship.vy, ship.vz, bound.x, bound.y, bound.z
+                ) > ORBIT_RANGE:
+                    self._echo_cockpit(ship, f"You break orbit around {ship.orbit}.", notes)
+                    ship.orbit = None
+                    if ship.state == ShipState.ORBIT:
+                        ship.state = ShipState.READY
+                    bound = None
+            if bound is not None:
+                if ship.currspeed <= 0:
+                    ship.vx, ship.vy, ship.vz = float(bound.x), float(bound.y), float(bound.z)
+                    ship.currspeed = 0
+                    if ship.state == ShipState.READY:
+                        ship.state = ShipState.ORBIT
+                continue
+            nearest = None
+            nearest_dist = None
+            for planet in ship.starsystem.planets:
+                dist = _distance(ship.vx, ship.vy, ship.vz, planet.x, planet.y, planet.z)
+                if dist > ORBIT_RANGE:
+                    continue
+                if nearest_dist is None or dist < nearest_dist:
+                    nearest, nearest_dist = planet, dist
+            if nearest is None:
+                continue
+            ship.orbit = nearest.name
+            ship.vx, ship.vy, ship.vz = float(nearest.x), float(nearest.y), float(nearest.z)
+            ship.currspeed = 0
+            if ship.state in (ShipState.READY, ShipState.BUSY, ShipState.BUSY_2, ShipState.BUSY_3):
+                ship.state = ShipState.ORBIT
+            self._echo_cockpit(
+                ship,
+                f"The ship settles into orbit around {nearest.name}.",
+                notes,
+            )
 
     def _update_space(self, notes: List[Broadcast]) -> None:
         for ship in self.ships:
@@ -516,7 +548,10 @@ class GarageEngine:
 
             if ship.state == ShipState.BUSY_3:
                 self._echo_cockpit(ship, "Maneuver complete.", notes)
-                ship.state = ShipState.READY
+                if ship.orbit and ship.currspeed <= 0:
+                    ship.state = ShipState.ORBIT
+                else:
+                    ship.state = ShipState.READY
             elif ship.state == ShipState.BUSY_2:
                 ship.state = ShipState.BUSY_3
             elif ship.state == ShipState.BUSY:
@@ -531,14 +566,6 @@ class GarageEngine:
                 self._finish_launch(ship, notes)
             elif ship.state == ShipState.LAUNCH:
                 ship.state = ShipState.LAUNCH_2
-
-            if ship.starsystem and ship.currspeed > 0 and ship.state == ShipState.READY:
-                self._echo_cockpit(
-                    ship,
-                    f"Speed: {ship.currspeed}  Coords: "
-                    f"{ship.vx:.0f} {ship.vy:.0f} {ship.vz:.0f}",
-                    notes,
-                )
 
     def _enter_system(self, ship: Ship, system: StarSystem, x, y, z) -> None:
         if ship.starsystem and ship in ship.starsystem.ships:
@@ -568,7 +595,6 @@ class GarageEngine:
         ship.vx += ship.hx * ship.currspeed * 2
         ship.vy += ship.hy * ship.currspeed * 2
         ship.vz += ship.hz * ship.currspeed * 2
-        ship.energy = max(0, ship.energy - LAUNCH_FUEL)
         pad_room = ship.location
         ship.location = ""
         ship.state = ShipState.READY
@@ -590,17 +616,16 @@ class GarageEngine:
                 ship.state = ShipState.READY
             return
         self._leave_system(ship)
+        ship.orbit = None
         ship.location = pad.room_id
         ship.lastdoc = pad.room_id
         ship.currspeed = 0
         ship.state = ShipState.DOCKED
-        ship.energy = max(0, ship.energy - LAND_FUEL)
         if ship.owner == "Public":
-            ship.energy = ship.maxenergy
             ship.missiles = ship.maxmissiles
             ship.hull = ship.maxhull
             ship.shield = 0
-            self._echo_cockpit(ship, "Repairing and refueling ship...", notes)
+            self._echo_cockpit(ship, "Repairing ship...", notes)
         self._echo_cockpit(ship, "Landing sequence complete.", notes)
         self._echo_cockpit(ship, "You feel a slight thud as the ship sets down.", notes)
         self._echo_pad(pad.room_id, f"{ship.name} rolls back in and settles.", notes)
@@ -624,7 +649,7 @@ class GarageEngine:
         return fn(player, args, result_cls)
 
     def _commands(self) -> Dict[str, Callable]:
-        return {
+        commands = {
             "ships": self.cmd_ships,
             "unlock": self.cmd_unlock,
             "lock": self.cmd_lock,
@@ -635,20 +660,27 @@ class GarageEngine:
             "board": self.cmd_board,
             "enter": self.cmd_board,
             "leaveship": self.cmd_leaveship,
+            "leave": self.cmd_leaveship,
             "launch": self.cmd_launch,
             "land": self.cmd_land,
             "status": self.cmd_status,
             "radar": self.cmd_radar,
             "trajectory": self.cmd_trajectory,
             "accelerate": self.cmd_accelerate,
+            "acc": self.cmd_accelerate,
             "calculate": self.cmd_calculate,
+            "cal": self.cmd_calculate,
             "hyperspace": self.cmd_hyperspace,
+            "hyper": self.cmd_hyperspace,
             "target": self.cmd_target,
             "fire": self.cmd_fire,
             "recharge": self.cmd_recharge,
             "autopilot": self.cmd_autopilot,
-            "practice": self.cmd_practice,
         }
+        for name, fn in list(commands.items()):
+            if len(name) > 3:
+                commands.setdefault(name[:3], fn)
+        return commands
 
     def _result(self, result_cls, message: str, broadcasts: Optional[List[Broadcast]] = None):
         wire = None
@@ -667,6 +699,12 @@ class GarageEngine:
                 result_cls, "The ship is set on autopilot, you'll have to turn it off first."
             )
         return ship, None
+
+    def _can_maneuver(self, ship: Ship) -> bool:
+        return bool(
+            ship.starsystem
+            and ship.state in (ShipState.READY, ShipState.ORBIT)
+        )
 
     def cmd_ships(self, player, args, result_cls):
         parked = self.ships_at(player.current_room)
@@ -836,10 +874,6 @@ class GarageEngine:
             return err
         if ship.state not in (ShipState.DOCKED, ShipState.DISABLED):
             return self._result(result_cls, "The ship is not docked right now.")
-        chance = _skill(player)
-        if random.randint(1, 100) >= chance:
-            _learn(player, False)
-            return self._result(result_cls, "You fail to work the controls properly!")
         if ship.owner == "Public":
             if player.gold < RENT_GOLD:
                 return self._result(
@@ -850,8 +884,6 @@ class GarageEngine:
             rent_line = f"You pay {RENT_GOLD} gold to rent the ship.\n"
         else:
             rent_line = ""
-        if ship.energy <= 0:
-            return self._result(result_cls, "This ship has no fuel.")
         notes = []
         if ship.hatch_open:
             ship.hatch_open = False
@@ -860,7 +892,6 @@ class GarageEngine:
         ship.lastdoc = ship.location
         ship.state = ShipState.LAUNCH
         ship.currspeed = ship.realspeed
-        _learn(player, True)
         self._echo_pad(ship.location, f"{ship.name} begins to launch.", notes)
         self._echo_cockpit(ship, "The ship hums as it lifts off the ground.", notes)
         return self._result(
@@ -875,7 +906,7 @@ class GarageEngine:
             return err
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
-        if ship.state != ShipState.READY or not ship.starsystem:
+        if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         if not args.strip():
             lines = ["Land where?", "", "Choices:"]
@@ -892,14 +923,9 @@ class GarageEngine:
                 result_cls,
                 f"You're too far away. Get within {LAND_RANGE} (currently {dist:.0f}).",
             )
-        chance = _skill(player)
-        if random.randint(1, 100) >= chance:
-            _learn(player, False)
-            return self._result(result_cls, "You fail to work the controls properly!")
         ship.dest = pad.name
         ship.state = ShipState.LAND
         ship.currspeed = 0
-        _learn(player, True)
         return self._result(result_cls, f"Landing sequence initiated for {pad.name}.")
 
     def cmd_status(self, player, args, result_cls):
@@ -908,6 +934,8 @@ class GarageEngine:
             return err
         sysname = ship.starsystem.name if ship.starsystem else "(docked)"
         target = ship.target.name if ship.target else "none"
+        if ship.orbit:
+            sysname = f"{sysname}  Orbit: {ship.orbit}"
         lines = [
             f"{ship.name}:",
             f"System: {sysname}   State: {ship.state.value}",
@@ -915,7 +943,7 @@ class GarageEngine:
             f"Current Heading: {ship.hx:.0f} {ship.hy:.0f} {ship.hz:.0f}",
             f"Current Speed: {ship.currspeed}/{ship.realspeed}",
             f"Hull: {ship.hull}/{ship.maxhull}   Condition: {ship.state.value}",
-            f"Shields: {ship.shield}/{ship.maxshield}   Energy(fuel): {ship.energy}/{ship.maxenergy}",
+            f"Shields: {ship.shield}/{ship.maxshield}",
             f"Lasers: {ship.lasers}   Missiles: {ship.missiles}/{ship.maxmissiles}",
             f"Current Target: {target}",
             f"Autopilot: {'on' if ship.autopilot else 'off'}   Door: {'open' if ship.hatch_open else 'shut'}",
@@ -932,10 +960,12 @@ class GarageEngine:
             return self._result(result_cls, "You can only do that in realspace!")
         if not ship.starsystem:
             return self._result(result_cls, "You can't do that until you've finished launching!")
-        chance = _skill(player)
-        if random.randint(1, 100) >= max(chance, 40):
-            return self._result(result_cls, "You fail to work the controls properly!")
-        lines = [f"{ship.starsystem.name} — radar"]
+        lines = [
+            f"{ship.starsystem.name} — radar",
+            f"  YOU {ship.name:20} {ship.vx:6.0f} {ship.vy:6.0f} {ship.vz:6.0f}  "
+            f"speed {ship.currspeed}"
+            + (f"  orbit {ship.orbit}" if ship.orbit else ""),
+        ]
         for star in ship.starsystem.stars:
             dist = _distance(ship.vx, ship.vy, ship.vz, star.x, star.y, star.z)
             lines.append(f"  STAR {star.name:20} {star.x:6} {star.y:6} {star.z:6}  range {dist:.0f}")
@@ -949,8 +979,6 @@ class GarageEngine:
             lines.append(
                 f"  SHIP {other.name:20} {other.vx:6.0f} {other.vy:6.0f} {other.vz:6.0f}  range {dist:.0f}"
             )
-        if len(lines) == 1:
-            lines.append("  (empty sky)")
         return self._result(result_cls, "\n".join(lines))
 
     def cmd_trajectory(self, player, args, result_cls):
@@ -959,7 +987,7 @@ class GarageEngine:
             return err
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
-        if ship.state != ShipState.READY or not ship.starsystem:
+        if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         parts = args.split()
         if len(parts) < 3:
@@ -983,7 +1011,7 @@ class GarageEngine:
             return err
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
-        if ship.state != ShipState.READY or not ship.starsystem:
+        if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         if not args.strip():
             return self._result(result_cls, "Accelerate to what speed?")
@@ -1006,7 +1034,7 @@ class GarageEngine:
             return self._result(result_cls, "You can only do that in realspace.")
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
-        if ship.state != ShipState.READY:
+        if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         parts = args.split()
         if not parts:
@@ -1025,14 +1053,9 @@ class GarageEngine:
             jx, jy, jz = float(coords[0]), float(coords[1]), float(coords[2])
         except ValueError:
             return self._result(result_cls, "Those coordinates don't make sense.")
-        chance = _skill(player)
-        if random.randint(1, 100) >= max(chance, 30):
-            _learn(player, False)
-            return self._result(result_cls, "You fail to work the controls properly!")
         ship.currjump = dest
         ship.jumpx, ship.jumpy, ship.jumpz = jx, jy, jz
         ship.hyperdistance = max(1, _galaxy_distance(ship.starsystem, dest))
-        _learn(player, True)
         return self._result(
             result_cls,
             f"Hyperspace course plotted to {dest.name} "
@@ -1043,21 +1066,14 @@ class GarageEngine:
         ship, err = self._need_ship(player, result_cls)
         if err:
             return err
-        if ship.state != ShipState.READY or not ship.starsystem:
+        if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         if ship.currjump is None or ship.hyperdistance <= 0:
             return self._result(result_cls, "You need to calculate a jump first.")
-        if ship.energy < HYPER_FUEL:
-            return self._result(result_cls, "There's not enough fuel!")
-        chance = _skill(player)
-        if random.randint(1, 100) >= chance:
-            _learn(player, False)
-            return self._result(result_cls, "You fail to work the controls properly!")
-        ship.energy -= HYPER_FUEL
+        ship.orbit = None
         ship.state = ShipState.HYPERSPACE
         ship.currspeed = 0
         self._leave_system(ship)
-        _learn(player, True)
         return self._result(
             result_cls,
             "You push forward on the hyperspace lever. Stars smear into lines.",
@@ -1109,7 +1125,6 @@ class GarageEngine:
                 )
             dmg = random.randint(8, 18) * ship.lasers
             ship.laser_cool = 1
-            ship.energy = max(0, ship.energy - 5)
         elif weapon.startswith("mis"):
             if ship.missiles <= 0:
                 return self._result(result_cls, "You have no missiles left.")
@@ -1145,11 +1160,11 @@ class GarageEngine:
                     f"and wakes up back in the garage.",
                 ))
         self._leave_system(ship)
+        ship.orbit = None
         ship.state = ShipState.DOCKED
         ship.location = GARAGE_ROOM_ID
         ship.lastdoc = GARAGE_ROOM_ID
         ship.hull = ship.maxhull
-        ship.energy = ship.maxenergy
         ship.shield = 0
         ship.currspeed = 0
         ship.target = None
@@ -1159,13 +1174,10 @@ class GarageEngine:
         ship, err = self._need_ship(player, result_cls)
         if err:
             return err
-        if ship.energy < 50:
-            return self._result(result_cls, "There's not enough energy to charge the shields.")
         if ship.shield >= ship.maxshield:
             return self._result(result_cls, "Shields are already at maximum.")
-        amount = min(50, ship.maxshield - ship.shield, ship.energy // 2)
+        amount = min(50, ship.maxshield - ship.shield)
         ship.shield += amount
-        ship.energy -= amount
         return self._result(result_cls, f"Shields charged +{amount} ({ship.shield}/{ship.maxshield}).")
 
     def cmd_autopilot(self, player, args, result_cls):
@@ -1176,57 +1188,20 @@ class GarageEngine:
         state = "engaged" if ship.autopilot else "disengaged"
         return self._result(result_cls, f"Autopilot {state}.")
 
-    def cmd_practice(self, player, args, result_cls):
-        room = self.rooms.get(player.current_room)
-        if not room or "Gus" not in room.npcs:
-            return None
-        skill_name = (args or "wrenching").strip().lower()
-        if skill_name not in ("wrenching", "wrench", "tinkering", "mechanics", "driving"):
-            return self._result(
-                result_cls,
-                "Gus tells you, 'I only teach wrenching. Type: practice wrenching'",
-            )
-        skill = _skill(player)
-        if skill >= TRAINER_ADEPT:
-            return self._result(
-                result_cls,
-                "Gus tells you, 'I've taught you everything I know about wrenching. "
-                "You'll have to practice it on your own now...'",
-            )
-        if player.gold < TRAIN_COST:
-            return self._result(
-                result_cls,
-                f"Gus tells you, 'I charge {TRAIN_COST} gold, and you don't have it.'",
-            )
-        player.gold -= TRAIN_COST
-        bump = max(5, player.get_effective_attribute("intelligence"))
-        _set_skill(player, min(TRAINER_ADEPT, skill + bump))
-        new = _skill(player)
-        extra = ""
-        if new >= TRAINER_ADEPT:
-            extra = (
-                "\nGus tells you, 'You'll have to practice it on your own now...'"
-            )
-        return self._result(
-            result_cls,
-            f"You practice wrenching. ({new}%){extra}",
-        )
-
 
 # Not linked from the in-game help on purpose.
 GARAGE_HELP = """
 BACK GARAGE (south of Slick's Surplus):
-  practice wrenching    - Gus will train you from 0% to 20%
   ships                 - What's parked here
   unlock airstream      - Needs the padlock key
   open / close          - The camper door
   board airstream       - Climb in
-  launch                - Pull out (needs wrenching skill)
+  launch                - Pull out
   status / radar        - Instruments
-  trajectory <x> <y> <z> / accelerate <speed>
-  calculate [system x y z] / hyperspace
+  trajectory <x> <y> <z> / accelerate <speed> (acc)
+  calculate (cal) [system x y z] / hyperspace (hyper)
   land                  - List stops; land <name> within 200 units
   target / fire lasers  - Combat
   recharge / autopilot  - Shields and auto
-  leaveship             - After you set down and open up
+  leave / leaveship     - After you set down and open up
 """
