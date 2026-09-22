@@ -515,7 +515,17 @@ class GameCommands:
         if not room:
             return CommandResult("You can't move - you're nowhere!")
 
-        if room.id == "slick_store" and direction == "west":
+        if room.id == "jail":
+            if player.is_jail_locked():
+                remaining = player.get_jail_remaining()
+                return CommandResult(
+                    f"The cell door won't budge. You still have {remaining} second"
+                    f"{'s' if remaining != 1 else ''} left on your sentence."
+                )
+            new_room_id = room.exits.get("out")
+            if not new_room_id:
+                return CommandResult("The cell door is open, but there's nowhere to go.")
+        elif room.id == "slick_store" and direction == "west":
             if not player.ceelo_access_unlocked:
                 return CommandResult("You can't go west from here.")
             if player.ceelo_kicked_visit_id == player.slick_visit_id:
@@ -527,18 +537,9 @@ class GameCommands:
         else:
             new_room_id = room.exits.get(direction)
 
-        if direction not in room.exits:
-            if not (room.id == "slick_store" and direction == "west" and new_room_id):
+            if direction not in room.exits:
                 return CommandResult(f"You can't go {direction} from here.")
 
-        # Jail exit stays locked until the sentence is up
-        if room.id == "jail" and player.is_jail_locked():
-            remaining = player.get_jail_remaining()
-            return CommandResult(
-                f"The cell door won't budge. You still have {remaining} second"
-                f"{'s' if remaining != 1 else ''} left on your sentence."
-            )
-        
         # Check destination
         # Check if trying to enter Slick's while banned
         if new_room_id in {"slick_store", CEELO_ROOM_ID} and player.is_banned_from_slicks():
