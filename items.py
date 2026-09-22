@@ -217,11 +217,11 @@ FISH_SPECIES_COLORS = {
     "bass": "\033[32m",              # green
     "mud_carp": "\033[33m",          # yellow/brown (disheveled)
     "walleye": "\033[93m",           # bright yellow
-    "catfish": "\033[37m",           # white
+    "catfish": "\033[91m",           # bright red (was sting puffer)
     "trout": "\033[95m",             # bright magenta
     "pike": "\033[92m",              # bright green
     "moon_darter": "\033[96m",       # bright cyan
-    "sting_puffer": "\033[91m",      # bright red
+    "sting_puffer": "\033[31m",      # red (tiny / broken)
     "zen_guppy": "\033[35m",         # magenta
     "legendary_carp": "\033[94m",    # bright blue
     "ancient_whiskers": "\033[97m",  # bright white

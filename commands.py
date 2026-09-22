@@ -253,6 +253,7 @@ class GameCommands:
             "tip": self.cmd_tip,
             "roll": self.cmd_roll,
             "give": self.cmd_give,
+            "show": self.cmd_show,
             "shout": self.cmd_shout,
             "yell": self.cmd_shout,
             "who": self.cmd_who,
@@ -2679,6 +2680,14 @@ class GameCommands:
             "You roll your eyes.",
             broadcast=f"ROOM:{player.current_room}:{player.name} rolls their eyes.",
         )
+
+    def cmd_show(self, player: Player, args: str) -> CommandResult:
+        """Hidden: same as give while a Norm guessing round is active."""
+        if player.name.lower() not in self.norm_rounds:
+            return CommandResult(
+                "Unknown command: 'show'. Type 'help' for a list of commands."
+            )
+        return self.cmd_give(player, args)
 
     def cmd_give(self, player: Player, args: str) -> CommandResult:
         """Give an inventory item to another player in the room."""
