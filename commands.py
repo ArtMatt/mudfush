@@ -242,6 +242,7 @@ class GameCommands:
             "fix": self.cmd_repair,
             "consider": self.cmd_consider,
             "con": self.cmd_consider,
+            "sense": self.cmd_sense,
             "ponder": self.cmd_ponder,
             "brag": self.cmd_brag,
             "appraise": self.cmd_appraise,
@@ -2240,6 +2241,136 @@ class GameCommands:
         )
 
     @staticmethod
+    def _sense_likelihood(probability: float) -> str:
+        """Describe a species' share of the ordinary catch table."""
+        if probability >= 0.30:
+            return "one of the strongest possibilities"
+        if probability >= 0.15:
+            return "common in what might take the bait"
+        if probability >= 0.07:
+            return "a fair possibility"
+        if probability >= 0.03:
+            return "possible, though not common"
+        if probability >= 0.01:
+            return "unlikely"
+        return "very unlikely"
+
+    @staticmethod
+    def _sense_weather_notes(weather, species) -> List[str]:
+        """How today's sky changes bites and rarer fish, without ancient spoilers."""
+        if weather is None:
+            return []
+        sky = weather.name.lower()
+        notes = []
+        if weather.fish_modifier > 1.0:
+            notes.append(
+                f"The {sky} weather has fish feeding more readily."
+            )
+        elif weather.fish_modifier < 1.0:
+            notes.append(
+                f"The {sky} weather is making bites harder to come by."
+            )
+        if species.value > 30:
+            if weather.rare_fish_modifier > 1.0:
+                notes.append(
+                    f"The {sky} weather is stirring the less common fish."
+                )
+            elif weather.rare_fish_modifier < 1.0:
+                notes.append(
+                    f"The {sky} weather is keeping the less common fish down."
+                )
+        return notes
+
+    def cmd_sense(self, player: Player, args: str) -> CommandResult:
+        """Estimate one ordinary species' share of catches under current conditions."""
+        room = self.rooms.get(player.current_room)
+        if not room or not room.is_water:
+            return CommandResult(
+                "You listen for the lake, but there is no fishing water here to read."
+            )
+
+        query = args.strip()
+        if not query:
+            return CommandResult("Sense which fish? Try 'sense trout'.")
+
+        intelligence = player.get_effective_attribute("intelligence")
+        wisdom = player.get_effective_attribute("wisdom")
+        perception = intelligence + wisdom
+        if perception < 4:
+            return CommandResult(
+                "You study the water, but its fish are only shadows to you. "
+                "You need more Intelligence and Wisdom to make sense of them."
+            )
+
+        # Only templates in the ordinary catch table can be sensed. Unique
+        # ancient rolls deliberately remain invisible to this command.
+        species = self._match_catchable_species(query)
+        if not species or query.lower().strip().startswith("ancient "):
+            return CommandResult("You can't get a feel for that kind of fish.")
+
+        rare_modifier = 1.0
+        weather = None
+        if self.weather:
+            weather = self.weather.get_current_weather()
+            rare_modifier = weather.rare_fish_modifier
+
+        table = self._adjusted_catch_table(
+            player.get_fishing_power(),
+            rare_modifier,
+            player,
+        )
+        total_weight = sum(weight for _, weight in table)
+        species_weight = next(
+            weight for fish, weight in table if fish.id == species.id
+        )
+        probability = species_weight / total_weight
+        colored_species = colorize_fish_species(species.id, species.name)
+        if weather:
+            feel = (
+                f"You quiet your thoughts and feel for {colored_species} "
+                f"in the {weather.name.lower()} weather."
+            )
+        else:
+            feel = f"You quiet your thoughts and feel for {colored_species}."
+        lines = [
+            feel,
+            (
+                f"They seem {self._sense_likelihood(probability)} among the "
+                "fish that might take your bait."
+            ),
+        ]
+        lines.extend(self._sense_weather_notes(weather, species))
+
+        lure = player.equipped_lure
+        if (
+            lure
+            and not lure.is_broken()
+            and lure.is_specialty_lure()
+            and lure.attracts_fish_id == species.id
+        ):
+            lines.append(
+                f"Your {lure.plain_display_name} is drawing them toward you."
+            )
+
+        if perception >= 8:
+            # Better mental stats narrow a deliberately fuzzy estimate without
+            # exposing the source weights or ancient odds.
+            uncertainty = max(0.10, 0.50 - 0.05 * (perception - 8))
+            low = max(0.0, probability * (1.0 - uncertainty) * 100)
+            high = min(100.0, probability * (1.0 + uncertainty) * 100)
+            lines.append(
+                f"Your best guess is somewhere around {low:.1f}%–{high:.1f}% "
+                "of catches, if something bites."
+            )
+
+        return CommandResult(
+            "\n".join(lines),
+            broadcast=(
+                f"ROOM:{room.id}:{player.name} studies the water in silence."
+            ),
+        )
+
+    @staticmethod
     def _appraisal_range(value: int, score: int, *, total: bool) -> tuple[int, int]:
         """Return an INT/WIS-scaled estimate around a true sale value."""
         floor = 0.20 if total else 0.10
@@ -2851,6 +2982,7 @@ FISHING:
   ponder              - Review your heaviest catch of each kind
   brag <fish>         - Boast a personal-best weight to the room
   consider/con        - Estimate a fishing spot's population
+  sense <fish>        - Feel how likely a species is (Int+Wis)
   release <fish/#>    - Pay the lake; the commotion draws fish (Con)
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
   chum/dump chum       - Use chum to briefly improve this fishing spot
