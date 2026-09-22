@@ -21,6 +21,7 @@ from items import (
     SPECIALTY_LURE, LURE_FORBIDDEN_SPECIES,
     SPECIALTY_LURE_MAX_MULT, attuned_lure_name, attuned_lure_description,
     specialty_lure_essence_from_fish, is_ancient_fish_id,
+    colorize_fish_species, colorize_ancient_fish,
 )
 from market import (
     BubbaFishQuest,
@@ -30,7 +31,7 @@ from market import (
     apply_charisma_sell_bonus,
     create_random_norm_fish_quest,
 )
-from lake_state import LakeCycleState
+from lake_state import LakeCycleState, UNIQUE_FISH_SPECS
 from fishermen import Fisherman, FishermanManager, NPC_CATCH_MAX_SECONDS
 
 if TYPE_CHECKING:
@@ -241,6 +242,8 @@ class GameCommands:
             "fix": self.cmd_repair,
             "consider": self.cmd_consider,
             "con": self.cmd_consider,
+            "ponder": self.cmd_ponder,
+            "brag": self.cmd_brag,
             "appraise": self.cmd_appraise,
             "app": self.cmd_appraise,
             "drink": self.cmd_drink,  # Secret — beer level-up
@@ -1401,6 +1404,154 @@ class GameCommands:
         ]
         return CommandResult("\n".join(lines))
 
+    def _match_catchable_species(self, query: str) -> Optional[Item]:
+        """Resolve a player phrase to a catchable species template."""
+        q = query.lower().strip()
+        if not q:
+            return None
+        normalized = q.replace(" ", "_")
+        exact = []
+        partial = []
+        for fish, _ in CATCHABLE_FISH:
+            name = fish.name.lower()
+            if q == fish.id or normalized == fish.id or q == name:
+                exact.append(fish)
+            elif q in name or q in fish.id.replace("_", " "):
+                partial.append(fish)
+        if exact:
+            return exact[0]
+        if partial:
+            return partial[0]
+        return None
+
+    def _ancient_record_label(self, base_id: str) -> str:
+        spec = UNIQUE_FISH_SPECS.get(base_id)
+        if spec:
+            return colorize_ancient_fish(spec.unique_id, spec.name)
+        species = self._fish_species_by_id(base_id)
+        name = species.name if species else base_id.replace("_", " ")
+        return colorize_ancient_fish(f"ancient_{base_id}", f"Ancient {name}")
+
+    def _format_record_line(self, label: str, weight: float) -> str:
+        pad = max(1, 32 - len(strip_ansi(label)))
+        return f"  {label}{' ' * pad}{weight:.1f} lbs"
+
+    def cmd_ponder(self, player: Player, args: str) -> CommandResult:
+        """Show this player's heaviest ordinary and ancient catches."""
+        if not player.best_fish and not player.best_ancient:
+            return CommandResult(
+                "You sit still and ponder the ones that got away. "
+                "You don't have a personal best yet."
+            )
+
+        lines = ["You sit still and ponder your personal bests.", ""]
+        if player.best_fish:
+            lines.append("  CATCHES")
+            for fish, _ in CATCHABLE_FISH:
+                weight = player.best_fish.get(fish.id)
+                if weight:
+                    label = colorize_fish_species(fish.id, fish.name)
+                    lines.append(self._format_record_line(label, weight))
+            extras = [
+                fish_id for fish_id in player.best_fish
+                if fish_id not in {fish.id for fish, _ in CATCHABLE_FISH}
+            ]
+            for fish_id in extras:
+                lines.append(
+                    self._format_record_line(
+                        fish_id.replace("_", " "),
+                        player.best_fish[fish_id],
+                    )
+                )
+            lines.append("")
+        if player.best_ancient:
+            lines.append("  ANCIENTS")
+            for fish, _ in CATCHABLE_FISH:
+                weight = player.best_ancient.get(fish.id)
+                if weight:
+                    lines.append(
+                        self._format_record_line(
+                            self._ancient_record_label(fish.id),
+                            weight,
+                        )
+                    )
+            extras = [
+                fish_id for fish_id in player.best_ancient
+                if fish_id not in {fish.id for fish, _ in CATCHABLE_FISH}
+            ]
+            for fish_id in extras:
+                lines.append(
+                    self._format_record_line(
+                        self._ancient_record_label(fish_id),
+                        player.best_ancient[fish_id],
+                    )
+                )
+            lines.append("")
+        return CommandResult("\n".join(lines).rstrip())
+
+    def cmd_brag(self, player: Player, args: str) -> CommandResult:
+        """Boast about a personal-best weight to the current room."""
+        query = args.strip()
+        if not query:
+            return CommandResult("Brag about which fish? Try 'brag trout'.")
+
+        want_ancient = False
+        species_query = query.lower()
+        if species_query == "ancient":
+            want_ancient = True
+            species_query = ""
+        elif species_query.startswith("ancient "):
+            want_ancient = True
+            species_query = species_query[8:].strip()
+        elif species_query in {
+            "whiskers", "old whiskers", "ancient whiskers",
+        }:
+            want_ancient = True
+            species_query = "old whiskers"
+
+        if want_ancient:
+            if not player.best_ancient:
+                return self._brag_embarrassed(player)
+            if species_query:
+                species = self._match_catchable_species(species_query)
+                if not species or species.id not in player.best_ancient:
+                    return self._brag_embarrassed(player)
+                base_id = species.id
+                weight = player.best_ancient[base_id]
+            else:
+                base_id = max(
+                    player.best_ancient,
+                    key=lambda fish_id: player.best_ancient[fish_id],
+                )
+                weight = player.best_ancient[base_id]
+            spec = UNIQUE_FISH_SPECS.get(base_id)
+            display = spec.name if spec else f"Ancient {base_id.replace('_', ' ')}"
+            colored = self._ancient_record_label(base_id)
+        else:
+            species = self._match_catchable_species(species_query)
+            if not species or species.id not in player.best_fish:
+                return self._brag_embarrassed(player)
+            weight = player.best_fish[species.id]
+            display = species.name
+            colored = colorize_fish_species(species.id, species.name)
+
+        return CommandResult(
+            message=f"You brag about your {weight:.1f} lb {colored}.",
+            broadcast=(
+                f"ROOM:{player.current_room}:{player.name} brags about a "
+                f"{weight:.1f} lb {display}!"
+            ),
+        )
+
+    def _brag_embarrassed(self, player: Player) -> CommandResult:
+        """Failed brag: you look embarrassed, and the room sees it."""
+        return CommandResult(
+            message="You look embarrassed.",
+            broadcast=(
+                f"ROOM:{player.current_room}:{player.name} looks embarrassed."
+            ),
+        )
+
     def cmd_drink(self, player: Player, args: str) -> CommandResult:
         """Secret: drink an unopened beer to permanently improve an attribute."""
         if player.beer_awaiting_attr or player.beer_confirm_attr:
@@ -1805,7 +1956,7 @@ class GameCommands:
                 player.reserved_unique_fish_ids.discard(fish_copy.id)
             if fish_copy.id == "ancient_whiskers":
                 player.ancient_whiskers_reserved = False
-            level_lines = player.record_fish_catch(fish_copy.weight)
+            level_lines = player.record_fish_catch(fish_copy.weight, fish_copy)
             level_progress = (
                 f"[{player.total_weight_caught:.1f}/"
                 f"{player.next_level_threshold():g}]"
@@ -2688,6 +2839,8 @@ ITEMS:
 
 FISHING:
   fish/cast           - Cast your line (need pole equipped!)
+  ponder              - Review your heaviest catch of each kind
+  brag <fish>         - Boast a personal-best weight to the room
   consider/con        - Estimate a fishing spot's population
   release <fish/#>    - Pay the lake; the commotion draws fish (Con)
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices

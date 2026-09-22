@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
-from items import Item, ItemType, WearSlot, is_ancient_fish_id
+from items import Item, ItemType, WearSlot, is_ancient_fish_id, ancient_base_fish_id
 
 
 SAVE_DIR = Path("saves")
@@ -79,6 +79,9 @@ class Player:
     fish_caught: int = 0
     biggest_catch: float = 0.0  # Weight of biggest fish
     total_weight_caught: float = 0.0  # Lifetime lbs of fish caught
+    # Heaviest ordinary catch per species id, and heaviest ancient per base id.
+    best_fish: Dict[str, float] = field(default_factory=dict)
+    best_ancient: Dict[str, float] = field(default_factory=dict)
     level: int = 1
     pending_level_ups: int = 0  # Unspent permanent attribute improvements
     total_gold_earned: int = 0  # Lifetime earnings
@@ -134,7 +137,22 @@ class Player:
         """Lifetime lbs needed to reach the next level."""
         return weight_threshold_for_level(self.level + 1)
 
-    def record_fish_catch(self, weight: float) -> List[str]:
+    def note_catch_record(self, fish: Item) -> None:
+        """Remember a personal-best weight for this species, ordinary or ancient."""
+        weight = float(fish.weight or 0.0)
+        if weight <= 0:
+            return
+        if is_ancient_fish_id(fish.id):
+            key = ancient_base_fish_id(fish.id)
+            if weight > self.best_ancient.get(key, 0.0):
+                self.best_ancient[key] = weight
+            return
+        if fish.item_type != ItemType.FISH:
+            return
+        if weight > self.best_fish.get(fish.id, 0.0):
+            self.best_fish[fish.id] = weight
+
+    def record_fish_catch(self, weight: float, fish: Optional[Item] = None) -> List[str]:
         """
         Record a landed fish's weight toward leveling.
         Returns level-up notification lines (may be empty).
@@ -146,6 +164,8 @@ class Player:
         if weight > self.biggest_catch:
             self.biggest_catch = weight
         self.fish_caught += 1
+        if fish is not None:
+            self.note_catch_record(fish)
 
         earned = level_from_total_weight(self.total_weight_caught)
         if earned <= self.level:
@@ -283,6 +303,8 @@ class Player:
             "attributes": self.attributes,
             "fish_caught": self.fish_caught,
             "biggest_catch": self.biggest_catch,
+            "best_fish": dict(self.best_fish),
+            "best_ancient": dict(self.best_ancient),
             "total_weight_caught": self.total_weight_caught,
             "level": self.level,
             "pending_level_ups": self.pending_level_ups,
@@ -353,6 +375,14 @@ class Player:
             gold=data.get("gold", 50),
             fish_caught=data.get("fish_caught", 0),
             biggest_catch=data.get("biggest_catch", 0.0),
+            best_fish={
+                str(key): float(value)
+                for key, value in (data.get("best_fish") or {}).items()
+            },
+            best_ancient={
+                str(key): float(value)
+                for key, value in (data.get("best_ancient") or {}).items()
+            },
             total_weight_caught=float(data.get("total_weight_caught", 0.0)),
             level=int(data.get("level", 1)),
             pending_level_ups=int(data.get("pending_level_ups", 0)),
