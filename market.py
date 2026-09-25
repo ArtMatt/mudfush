@@ -144,6 +144,10 @@ class Market:
     BUBBA_QUEST_NUDGE_EVERY = 5  # remind on every 5th extra fish, not each sale
     BUBBA_UNLIMITED_GEAR_IDS = frozenset({"basic_pole"})
     BUBBA_ONLY_IDS = frozenset({"bucket_of_chum", "lure_kit"})
+    SLICK_ONLY_IDS = frozenset({"camper_key"})
+    FIXED_BUY_PRICES = {
+        (StoreType.SLICK, "camper_key"): 10000,
+    }
     
     def __init__(self):
         self.prices: Dict[str, Dict[str, PriceInfo]] = {
@@ -218,6 +222,13 @@ class Market:
                 trend=random.choice([-1, 0, 1]),
                 volatility=0.35  # 35% swings - very volatile
             )
+        slick_key = self.prices[StoreType.SLICK.value].get("camper_key")
+        if slick_key:
+            slick_key.base_price = 10000
+            slick_key.current_buy_price = 10000
+            slick_key.current_sell_price = 1
+            slick_key.volatility = 0
+            slick_key.trend = 0
         
         for fish in fish_items:
             # Slick's fish prices are all over the place
@@ -403,6 +414,8 @@ class Market:
         item, _ = STORE_INVENTORY[item_id]
         if store == StoreType.SLICK and item_id in self.BUBBA_ONLY_IDS:
             return False
+        if store == StoreType.BUBBA and item_id in self.SLICK_ONLY_IDS:
+            return False
         if item.item_type == ItemType.WEARABLE:
             return item_id in self.clothing_stock.get(store.value, [])
         if store == StoreType.BUBBA and self.is_limited_bubba_gear(item_id):
@@ -429,6 +442,9 @@ class Market:
         """Get the price to BUY an item FROM a store."""
         if not self.is_item_for_sale(store, item_id):
             return None
+        fixed = self.FIXED_BUY_PRICES.get((store, item_id))
+        if fixed is not None:
+            return fixed
         prices = self.prices.get(store.value, {})
         if item_id in prices:
             return prices[item_id].current_buy_price
@@ -529,6 +545,13 @@ class Market:
             store_prices = self.prices[store_type.value]
             
             for item_id, price_info in store_prices.items():
+                if (store_type, item_id) in self.FIXED_BUY_PRICES:
+                    price_info.current_buy_price = self.FIXED_BUY_PRICES[
+                        (store_type, item_id)
+                    ]
+                    price_info.volatility = 0
+                    price_info.trend = 0
+                    continue
                 old_sell = price_info.current_sell_price
                 old_buy = price_info.current_buy_price
                 
@@ -656,8 +679,8 @@ class Market:
             if item.item_type == ItemType.WEARABLE:
                 continue
             if self.is_item_for_sale(store, item_id):
-                info = self.prices.get(store.value, {}).get(item_id)
-                if info and info.current_buy_price > 0:
+                price = self.get_buy_price(store, item_id)
+                if price and price > 0:
                     items.append(item)
 
         for item in sorted(
@@ -733,7 +756,7 @@ class Market:
                 info = store_prices[item.id]
                 lines.append(
                     self._format_buy_line(
-                        number, item, info, show_trends, show_relative
+                        store, number, item, info, show_trends, show_relative
                     )
                 )
                 number += 1
@@ -761,7 +784,7 @@ class Market:
                     extra += f" {pink_star}"
                 lines.append(
                     self._format_buy_line(
-                        number, item, info, show_trends, show_relative,
+                        store, number, item, info, show_trends, show_relative,
                         extra=extra,
                     )
                 )
@@ -826,6 +849,7 @@ class Market:
 
     def _format_buy_line(
         self,
+        store: StoreType,
         number: int,
         item: Item,
         info: PriceInfo,
@@ -834,12 +858,19 @@ class Market:
         extra: str = "",
     ) -> str:
         """Format one for-sale price line with wisdom-gated details."""
-        line = f"  {number}) {item.name:<23} {info.current_buy_price:>4}g"
-        if show_trends:
+        buy_price = self.get_buy_price(store, item.id)
+        if buy_price is None:
+            buy_price = info.current_buy_price
+        line = f"  {number}) {item.name:<23} {buy_price:>4}g"
+        if show_trends and item.id not in self.SLICK_ONLY_IDS:
             line += f" {self.get_trend_symbol(info.trend)}"
-        if show_relative and info.base_price > 0:
+        if (
+            show_relative
+            and info.base_price > 0
+            and item.id not in self.SLICK_ONLY_IDS
+        ):
             pct = round(
-                ((info.current_buy_price - info.base_price) / info.base_price) * 100
+                ((buy_price - info.base_price) / info.base_price) * 100
             )
             if pct != 0:
                 line += f" ({pct:+d}% vs usual)"

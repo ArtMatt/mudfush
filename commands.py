@@ -6,11 +6,11 @@ import random
 import re
 import time
 import math
-from typing import Optional, Callable, Dict, List, TYPE_CHECKING
+from typing import Optional, Callable, Dict, List, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 
-from player import Player, PlayerManager
-from world import Room, DIRECTION_ALIASES
+from player import Player, PlayerManager, TRUCK_CAPACITY
+from world import Room, DIRECTION_ALIASES, TRUCK_ROOM_ID
 from camper import FISHING_HOLE_IDS
 from items import (
     Item, ItemType, STORE_INVENTORY, CATCHABLE_FISH, create_item_copy,
@@ -23,6 +23,7 @@ from items import (
     SPECIALTY_LURE_MAX_MULT, attuned_lure_name, attuned_lure_description,
     specialty_lure_essence_from_fish, is_ancient_fish_id,
     colorize_fish_species, colorize_ancient_fish,
+    normalize_container_shards, CAMPER_KEY,
 )
 from market import (
     BubbaFishQuest,
@@ -219,6 +220,8 @@ class GameCommands:
             "get": self.cmd_get,
             "take": self.cmd_get,
             "pick": self.cmd_get,
+            "put": self.cmd_put,
+            "truck": self.cmd_truck,
             "drop": self.cmd_drop,
             "use": self.cmd_use,
             "dump": self.cmd_chum,
@@ -318,6 +321,13 @@ class GameCommands:
             attribute = ATTRIBUTE_ALIASES.get(command)
             if attribute:
                 return self._choose_beer_attribute(player, attribute)
+
+        if command in ("board", "enter", "boa", "ent"):
+            boarded = self._maybe_refuse_truck_board(player, args)
+            if boarded is not None:
+                return boarded
+        if command in ("take", "get", "pick") and self._args_name_truck(args):
+            return self.cmd_take_from_truck(player, args)
         
         if command in self.commands:
             return self.commands[command](player, args)
@@ -445,6 +455,8 @@ class GameCommands:
             direction = DIRECTION_ALIASES.get(cleaned)
             if direction:
                 return self._look_direction(player, direction)
+            if self._is_truck_name(cleaned):
+                return self.cmd_truck(player, "")
             return self.cmd_examine(player, args)
         
         room = self.rooms.get(player.current_room)
@@ -472,6 +484,11 @@ class GameCommands:
         description = room.get_description(current_player=player.name)
         if self.garage:
             description += self.garage.describe_ships_here(room.id)
+        if room.id == TRUCK_ROOM_ID:
+            description += (
+                "\nParked here:\n"
+                "  - Your Truck"
+            )
         if room.id != "slick_store" or not player.ceelo_access_unlocked:
             return description
         exits = list(room.exits.keys())
@@ -616,6 +633,9 @@ class GameCommands:
         room = self.rooms.get(player.current_room)
         item_name = item_name.lower().strip()
 
+        if self._args_name_truck(item_name):
+            return self.cmd_take_from_truck(player, item_name)
+
         if item_name in ("all", "*"):
             return self._get_all_items(player, room)
         
@@ -699,6 +719,219 @@ class GameCommands:
         return CommandResult(
             message=f"You drop the {item.display_name}.",
             broadcast=f"ROOM:{room.id}:{player.name} drops {item.display_name}."
+        )
+
+    def _is_truck_name(self, text: str) -> bool:
+        cleaned = (text or "").strip().lower()
+        return cleaned in {
+            "truck", "trucks", "pickup", "your truck", "the truck", "my truck",
+        }
+
+    def _args_name_truck(self, args: str) -> bool:
+        tokens = (args or "").strip().lower().split()
+        if not tokens:
+            return False
+        if tokens[-1] in ("truck", "trucks", "pickup"):
+            return True
+        if len(tokens) >= 2 and tokens[-2] in ("in", "into", "from", "to") and tokens[-1] in (
+            "truck", "trucks", "pickup",
+        ):
+            return True
+        return False
+
+    def _item_query_from_truck_args(self, args: str) -> str:
+        tokens = (args or "").strip().lower().split()
+        if not tokens:
+            return ""
+        if len(tokens) >= 2 and tokens[-2] in ("in", "into", "from", "to") and tokens[-1] in (
+            "truck", "trucks", "pickup",
+        ):
+            return " ".join(tokens[:-2]).strip()
+        if tokens[-1] in ("truck", "trucks", "pickup"):
+            return " ".join(tokens[:-1]).strip()
+        return " ".join(tokens).strip()
+
+    def _maybe_refuse_truck_board(self, player: Player, args: str) -> Optional[CommandResult]:
+        if player.current_room != TRUCK_ROOM_ID:
+            return None
+        cleaned = (args or "").strip().lower()
+        if not cleaned or self._is_truck_name(cleaned) or cleaned in ("it",):
+            return CommandResult("You aren't quite ready to leave yet...")
+        return None
+
+    def _shard_combine_note(self, before: List[Item], after: List[Item]) -> str:
+        before_gems = sum(1 for item in before if item.item_type == ItemType.GEM)
+        after_gems = sum(1 for item in after if item.item_type == ItemType.GEM)
+        if after_gems > before_gems:
+            return " Same-color shards combine."
+        if any(
+            item.item_type == ItemType.SHARD for item in before
+        ) and any(
+            item.item_type == ItemType.SHARD for item in after
+        ):
+            before_shards = [
+                (item.gem_attribute, item.shard_progress)
+                for item in before if item.item_type == ItemType.SHARD
+            ]
+            after_shards = [
+                (item.gem_attribute, item.shard_progress)
+                for item in after if item.item_type == ItemType.SHARD
+            ]
+            if before_shards != after_shards:
+                return " Same-color shards combine."
+        return ""
+
+    def cmd_truck(self, player: Player, args: str) -> CommandResult:
+        """List the contents of the player's truck."""
+        if player.current_room != TRUCK_ROOM_ID:
+            return CommandResult("You don't see your truck here.")
+        return CommandResult(player.get_truck_display())
+
+    def _truck_put_candidates(self, player: Player) -> Tuple[List[Item], List[Item], List[Item]]:
+        """Split inventory into storable items, worn/equipped, and ancients."""
+        storable: List[Item] = []
+        equipped: List[Item] = []
+        ancients: List[Item] = []
+        for item in list(player.inventory):
+            if player.is_wearing_or_equipped(item):
+                equipped.append(item)
+            elif is_ancient_fish_id(item.id):
+                ancients.append(item)
+            else:
+                storable.append(item)
+        return storable, equipped, ancients
+
+    def _put_all_in_truck(self, player: Player) -> CommandResult:
+        """Store every eligible inventory item that fits after shard merge."""
+        candidates, equipped, ancients = self._truck_put_candidates(player)
+        if not candidates and not equipped and not ancients:
+            return CommandResult("You're not carrying anything to store.")
+        if not candidates:
+            lines = []
+            if equipped:
+                lines.append("You should unequip that before storing it.")
+            if ancients:
+                lines.append("Those fish will not stay in the truck. They want the water.")
+            return CommandResult("\n".join(lines))
+
+        stored: List[Item] = []
+        leftover: List[Item] = []
+        truck = list(player.truck_storage)
+        for item in candidates:
+            preview = normalize_container_shards(truck + [item])
+            if len(preview) > TRUCK_CAPACITY:
+                leftover.append(item)
+                continue
+            truck = preview
+            stored.append(item)
+
+        if not stored:
+            return CommandResult(
+                f"The truck is full. ({len(player.truck_storage)}/{TRUCK_CAPACITY})"
+            )
+
+        before = list(player.truck_storage)
+        moving = list(stored)
+        for item in stored:
+            player.remove_item(item)
+        player.truck_storage = truck
+        note = self._shard_combine_note(before + moving, truck)
+
+        lines = ["You put everything you can in your truck:"]
+        for item in stored:
+            lines.append(f"  - {item.display_name}")
+        if leftover:
+            lines.append(
+                f"The truck is full. ({len(player.truck_storage)}/{TRUCK_CAPACITY})"
+            )
+            lines.append("Left in your hands:")
+            for item in leftover:
+                lines.append(f"  - {item.display_name}")
+        if equipped:
+            lines.append("Left equipped:")
+            for item in equipped:
+                lines.append(f"  - {item.display_name}")
+        if ancients:
+            lines.append("Those fish will not stay in the truck:")
+            for item in ancients:
+                lines.append(f"  - {item.display_name}")
+        if note:
+            lines.append(note.strip())
+        lines.append(player.get_truck_display())
+        return CommandResult("\n".join(lines))
+
+    def _take_all_from_truck(self, player: Player) -> CommandResult:
+        """Move every stored truck item into inventory."""
+        if not player.truck_storage:
+            return CommandResult("Your truck is empty.")
+        taken = list(player.truck_storage)
+        before = list(player.inventory)
+        player.truck_storage = []
+        player.inventory.extend(taken)
+        player.inventory = normalize_container_shards(player.inventory)
+        note = self._shard_combine_note(before + taken, player.inventory)
+        lines = ["You take everything from your truck:"]
+        for item in taken:
+            lines.append(f"  - {item.display_name}")
+        if note:
+            lines.append(note.strip())
+        return CommandResult("\n".join(lines))
+
+    def cmd_put(self, player: Player, args: str) -> CommandResult:
+        """Store an item in the truck: put <item> truck / put all truck."""
+        if not args.strip():
+            return CommandResult("Put what where?")
+        if not self._args_name_truck(args) and not self._is_truck_name(args):
+            return CommandResult("Put it where? Try: put <item> truck")
+        if player.current_room != TRUCK_ROOM_ID:
+            return CommandResult("You don't see your truck here.")
+        query = self._item_query_from_truck_args(args)
+        if not query:
+            return CommandResult("Put what in the truck?")
+        if query in ("all", "*"):
+            return self._put_all_in_truck(player)
+        item = player.find_item(query)
+        if not item:
+            return CommandResult(f"You're not carrying a '{query}'.")
+        if player.is_wearing_or_equipped(item):
+            return CommandResult("You should unequip that before storing it.")
+        if is_ancient_fish_id(item.id):
+            return CommandResult(
+                "That fish will not stay in the truck. It wants the water."
+            )
+        preview = normalize_container_shards(list(player.truck_storage) + [item])
+        if len(preview) > TRUCK_CAPACITY:
+            return CommandResult(
+                f"The truck is full. ({len(player.truck_storage)}/{TRUCK_CAPACITY})"
+            )
+        before = list(player.truck_storage)
+        player.remove_item(item)
+        player.truck_storage = preview
+        note = self._shard_combine_note(before + [item], preview)
+        extra = player.get_truck_display()
+        return CommandResult(
+            f"You put the {item.display_name} in your truck.{note}\n{extra}"
+        )
+
+    def cmd_take_from_truck(self, player: Player, args: str) -> CommandResult:
+        """Retrieve an item from the truck: take <item> truck / take all truck."""
+        if player.current_room != TRUCK_ROOM_ID:
+            return CommandResult("You don't see your truck here.")
+        query = self._item_query_from_truck_args(args)
+        if not query:
+            return CommandResult("Take what from the truck?")
+        if query in ("all", "*"):
+            return self._take_all_from_truck(player)
+        item = player.find_truck_item(query)
+        if not item:
+            return CommandResult(f"There's no '{query}' in your truck.")
+        player.truck_storage.remove(item)
+        before = list(player.inventory)
+        player.inventory.append(item)
+        player.inventory = normalize_container_shards(player.inventory)
+        note = self._shard_combine_note(before + [item], player.inventory)
+        return CommandResult(
+            f"You take the {item.display_name} from your truck.{note}"
         )
 
     def cmd_use(self, player: Player, item_name: str) -> CommandResult:
@@ -1132,14 +1365,17 @@ class GameCommands:
     def release_unique_fish(self, player: Player) -> bool:
         """Return all held or in-flight ancient fish to their catch pools."""
         held = [
-            item for item in player.inventory
+            item for item in list(player.inventory) + list(player.truck_storage)
             if is_ancient_fish_id(item.id)
         ]
         reserved_ids = set(player.reserved_unique_fish_ids)
         if player.ancient_whiskers_reserved:
             reserved_ids.add("ancient_whiskers")
         for item in held:
-            player.remove_item(item)
+            if item in player.inventory:
+                player.remove_item(item)
+            elif item in player.truck_storage:
+                player.truck_storage.remove(item)
         player.ancient_whiskers_reserved = False
         player.reserved_unique_fish_ids.clear()
         if self.lake_state:
@@ -1172,6 +1408,11 @@ class GameCommands:
         item = player.find_item(target)
         if item:
             return CommandResult(self._format_item_examine(item))
+        truck_item = player.find_truck_item(target)
+        if truck_item and player.current_room == TRUCK_ROOM_ID:
+            return CommandResult(self._format_item_examine(truck_item))
+        if self._is_truck_name(target):
+            return self.cmd_truck(player, "")
         
         # Check room items
         room = self.rooms.get(player.current_room)
@@ -2982,6 +3223,11 @@ ITEMS:
   get/take/pick <item>  - Pick up an item
   get all               - Pick up everything on the ground
   drop <item>          - Drop an item
+  put <item/#> truck   - Store an item in your truck (parking lot)
+  put all truck        - Store everything you can in your truck
+  take <item/#> truck  - Take an item from your truck
+  take all truck       - Take everything from your truck
+  truck                - Look in your truck
   use <item>           - Use a consumable item
   use/feed <jig> <fish>  - Hand Cliff a fish to dress or improve a jig
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
@@ -3202,7 +3448,9 @@ TIPS:
         )
         bought_kit = item.id == "lure_kit"
         # Store-bought fishing gear is always brand new
-        if bought_kit:
+        if store_type == StoreType.SLICK and item.id == CAMPER_KEY.id:
+            new_item = create_item_copy(CAMPER_KEY, roll_stats=False, condition=4)
+        elif bought_kit:
             new_item = create_item_copy(SPECIALTY_LURE, condition=9)
         elif item.item_type in DEGRADABLE_TYPES:
             new_item = create_item_copy(item, condition=9)

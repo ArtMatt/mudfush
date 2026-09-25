@@ -11,10 +11,14 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
-from items import Item, ItemType, WearSlot, is_ancient_fish_id, ancient_base_fish_id
+from items import (
+    Item, ItemType, WearSlot, is_ancient_fish_id, ancient_base_fish_id,
+    item_to_save_dict, item_from_save_dict,
+)
 
 
 SAVE_DIR = Path("saves")
+TRUCK_CAPACITY = 50
 
 # Level 2 at 100 lbs total caught, then 200, 400, 800, ...
 LEVEL_WEIGHT_BASE = 100.0
@@ -64,6 +68,7 @@ class Player:
     password_salt: str = ""  # Salt for password hashing
     current_room: str = "store"  # Start at the fishing store
     inventory: List[Item] = field(default_factory=list)
+    truck_storage: List[Item] = field(default_factory=list)
     gold: int = 50  # Starting money
     equipped_pole: Optional[Item] = None
     equipped_lure: Optional[Item] = None
@@ -245,33 +250,6 @@ class Player:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert player to dictionary for saving."""
-        def item_to_dict(item: Item) -> Dict[str, Any]:
-            return {
-                "id": item.id,
-                "name": item.name,
-                "description": item.description,
-                "item_type": item.item_type.value,
-                "takeable": item.takeable,
-                "value": item.value,
-                "fishing_power": item.fishing_power,
-                "attraction": item.attraction,
-                "weight": item.weight,
-                "wear_slot": item.wear_slot.value if item.wear_slot else None,
-                "condition": item.condition,
-                "modifiers": [
-                    {"attribute": attr, "value": val}
-                    for attr, val in item.modifiers
-                ],
-                # Legacy fields for older readers
-                "modifier_attribute": item.modifier_attribute,
-                "modifier_value": item.modifier_value,
-                "fish_size": item.fish_size,
-                "gem_attribute": item.gem_attribute,
-                "shard_progress": item.shard_progress,
-                "attracts_fish_id": item.attracts_fish_id,
-                "lure_essence": item.lure_essence,
-            }
-        
         equipped_pole_idx = None
         equipped_lure_idx = None
         
@@ -293,8 +271,13 @@ class Player:
             # Ancient fish return to the lake on logout/restart and are
             # therefore never persisted in a character save.
             "inventory": [
-                item_to_dict(item)
+                item_to_save_dict(item)
                 for item in self.inventory
+                if not is_ancient_fish_id(item.id)
+            ],
+            "truck_storage": [
+                item_to_save_dict(item)
+                for item in self.truck_storage
                 if not is_ancient_fish_id(item.id)
             ],
             "gold": self.gold,
@@ -326,40 +309,16 @@ class Player:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Player':
         """Create player from saved dictionary."""
-        def dict_to_item(d: Dict[str, Any]) -> Item:
-            mods = []
-            if d.get("modifiers"):
-                for entry in d["modifiers"]:
-                    attr = entry.get("attribute")
-                    val = int(entry.get("value", 0))
-                    if attr and val > 0:
-                        mods.append((attr, val))
-            elif d.get("modifier_attribute") and d.get("modifier_value", 0) > 0:
-                mods = [(d["modifier_attribute"], int(d["modifier_value"]))]
-            name = d["name"]
-            if d["id"] == "specialty_lure" and "specialty lure" in name.lower():
-                name = name.replace("specialty lure", "jig")
-            return Item(
-                id=d["id"],
-                name=name,
-                description=d["description"],
-                item_type=ItemType(d["item_type"]),
-                takeable=d.get("takeable", True),
-                value=d.get("value", 0),
-                fishing_power=d.get("fishing_power", 0),
-                attraction=d.get("attraction", 0),
-                weight=d.get("weight", 0.0),
-                wear_slot=WearSlot(d["wear_slot"]) if d.get("wear_slot") else None,
-                condition=d.get("condition", 5),
-                modifiers=mods,
-                fish_size=d.get("fish_size"),
-                gem_attribute=d.get("gem_attribute"),
-                shard_progress=int(d.get("shard_progress") or 0),
-                attracts_fish_id=d.get("attracts_fish_id"),
-                lure_essence=float(d.get("lure_essence") or 0.0),
-            )
-        
-        inventory = [dict_to_item(item_data) for item_data in data.get("inventory", [])]
+        inventory = [
+            item_from_save_dict(item_data)
+            for item_data in data.get("inventory", [])
+            if not is_ancient_fish_id(item_data.get("id", ""))
+        ]
+        truck_storage = [
+            item_from_save_dict(item_data)
+            for item_data in data.get("truck_storage", [])
+            if not is_ancient_fish_id(item_data.get("id", ""))
+        ]
         
         player = cls(
             name=data["name"],
@@ -367,6 +326,7 @@ class Player:
             password_salt=data.get("password_salt", ""),
             current_room=data.get("current_room", "store"),
             inventory=inventory,
+            truck_storage=truck_storage,
             attributes={
                 attribute: data.get("attributes", {}).get(attribute, 1)
                 for attribute in (
@@ -495,6 +455,34 @@ class Player:
             if item.matches(item_name):
                 return item
         return None
+
+    def find_truck_item(self, item_name: str) -> Optional[Item]:
+        """Find an item in truck storage by display number or name."""
+        query = item_name.strip().lower().rstrip(")")
+        if query.isdigit():
+            index = int(query) - 1
+            if 0 <= index < len(self.truck_storage):
+                return self.truck_storage[index]
+            return None
+        for item in self.truck_storage:
+            if item.matches(item_name):
+                return item
+        return None
+
+    def get_truck_display(self) -> str:
+        """Formatted listing of items in the player's truck."""
+        lines = [
+            "",
+            "  YOUR TRUCK",
+            "=" * 40,
+            f"  {len(self.truck_storage)}/{TRUCK_CAPACITY} slots used",
+        ]
+        if not self.truck_storage:
+            lines.append("  (empty)")
+            return "\n".join(lines)
+        for index, item in enumerate(self.truck_storage, start=1):
+            lines.append(f"  {index}) {item.display_name}")
+        return "\n".join(lines)
     
     def get_inventory_display(self, filter_text: str = "") -> str:
         """

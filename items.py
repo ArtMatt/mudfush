@@ -6,7 +6,7 @@ import random
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class ItemType(Enum):
@@ -975,11 +975,12 @@ CAMPER_KEY = Item(
     name="small padlock key",
     description=(
         "A stubby key on a bent bottle-opener fob. The brass is worn "
-        "smooth and someone scratched a G into it."
+        "smooth and someone scratched a G into it. Slick keeps these "
+        "behind the counter and will not haggle."
     ),
     item_type=ItemType.MISC,
     takeable=True,
-    value=0,
+    value=10000,
     condition=4,  # reads as "worn", which is all a key ever is
 )
 
@@ -1184,6 +1185,7 @@ STORE_INVENTORY = {
     "bucket_of_chum": (BUCKET_OF_CHUM, 1),
     "lure_kit": (LURE_KIT, 1),
     "toolkit": (TOOLKIT, 1),  # Rare
+    "camper_key": (CAMPER_KEY, 1),
     **{item_id: (item, 3) for item_id, item in WEARABLE_ITEMS.items()},
 }
 
@@ -1243,6 +1245,96 @@ def create_item_copy(
         attracts_fish_id=item.attracts_fish_id,
         lure_essence=item.lure_essence,
     )
+
+
+def item_to_save_dict(item: Item) -> Dict[str, Any]:
+    """Serialize an item for player or world save files."""
+    return {
+        "id": item.id,
+        "name": item.name,
+        "description": item.description,
+        "item_type": item.item_type.value,
+        "takeable": item.takeable,
+        "value": item.value,
+        "fishing_power": item.fishing_power,
+        "attraction": item.attraction,
+        "weight": item.weight,
+        "wear_slot": item.wear_slot.value if item.wear_slot else None,
+        "condition": item.condition,
+        "modifiers": [
+            {"attribute": attr, "value": val}
+            for attr, val in item.modifiers
+        ],
+        "modifier_attribute": item.modifier_attribute,
+        "modifier_value": item.modifier_value,
+        "fish_size": item.fish_size,
+        "gem_attribute": item.gem_attribute,
+        "shard_progress": item.shard_progress,
+        "attracts_fish_id": item.attracts_fish_id,
+        "lure_essence": item.lure_essence,
+    }
+
+
+def item_from_save_dict(data: Dict[str, Any]) -> Item:
+    """Restore an item from player or world save files."""
+    mods = []
+    if data.get("modifiers"):
+        for entry in data["modifiers"]:
+            attr = entry.get("attribute")
+            val = int(entry.get("value", 0))
+            if attr and val > 0:
+                mods.append((attr, val))
+    elif data.get("modifier_attribute") and data.get("modifier_value", 0) > 0:
+        mods = [(data["modifier_attribute"], int(data["modifier_value"]))]
+    name = data["name"]
+    if data["id"] == "specialty_lure" and "specialty lure" in name.lower():
+        name = name.replace("specialty lure", "jig")
+    return Item(
+        id=data["id"],
+        name=name,
+        description=data["description"],
+        item_type=ItemType(data["item_type"]),
+        takeable=data.get("takeable", True),
+        value=data.get("value", 0),
+        fishing_power=data.get("fishing_power", 0),
+        attraction=data.get("attraction", 0),
+        weight=data.get("weight", 0.0),
+        wear_slot=WearSlot(data["wear_slot"]) if data.get("wear_slot") else None,
+        condition=data.get("condition", 5),
+        modifiers=mods,
+        fish_size=data.get("fish_size"),
+        gem_attribute=data.get("gem_attribute"),
+        shard_progress=int(data.get("shard_progress") or 0),
+        attracts_fish_id=data.get("attracts_fish_id"),
+        lure_essence=float(data.get("lure_essence") or 0.0),
+    )
+
+
+def normalize_container_shards(items: List[Item]) -> List[Item]:
+    """
+    Collapse same-color shards in one container.
+
+    Totals progress per attribute, then emits total//100 gems and one
+    remainder shard if any percent is left. Non-shard items keep order.
+    """
+    totals: Dict[str, int] = {}
+    others: List[Item] = []
+    for item in items:
+        if item.item_type == ItemType.SHARD and item.gem_attribute:
+            totals[item.gem_attribute] = (
+                totals.get(item.gem_attribute, 0) + int(item.shard_progress or 0)
+            )
+        else:
+            others.append(item)
+    result = list(others)
+    for attribute, total in totals.items():
+        gems = total // 100
+        remainder = total % 100
+        for _ in range(gems):
+            result.append(create_gem(attribute))
+        if remainder > 0:
+            result.append(create_shard(attribute, remainder))
+    return result
 
 
 def create_glowing_lure() -> Item:

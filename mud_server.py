@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
-from camper import CAMPER_KEY_ID, FISHING_HOLE_IDS, GarageEngine
+from camper import FISHING_HOLE_IDS, GarageEngine
 from world import create_world, Room, reset_ground_items, population_shift_message
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
@@ -674,13 +674,9 @@ class FishingMUD:
         for room in self.rooms.values():
             if not room.items:
                 continue
-            # The scavenger has no use for a key to someone else's junk.
-            spared = [item for item in room.items if item.id == CAMPER_KEY_ID]
-            if len(spared) == len(room.items):
-                continue
             if room.players:
                 await self.broadcast_to_room(room.id, message)
-            room.items = spared
+            room.items = []
             cleared += 1
         return cleared
     
@@ -1030,7 +1026,7 @@ Admin console commands:
         self.commands.rooms = self.rooms
         self.fishermen = FishermanManager(self.rooms)
         self.commands.fishermen = self.fishermen
-        self.garage.rooms = self.rooms
+        self.garage.attach_rooms(self.rooms)
 
         moved = []
         for player, room_id in placements:

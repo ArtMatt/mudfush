@@ -19,10 +19,13 @@ key should only ever see a rusted-out trailer up on blocks.
 
 from __future__ import annotations
 
+import json
 import math
 import random
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -52,9 +55,12 @@ class ShipState(str, Enum):
 
 LAND_RANGE = 200          # how close you must be to set down
 ORBIT_RANGE = 200         # snap into orbit this close to a planet
+COORD_UPDATE_SECONDS = 15 # cockpit position ping while flying
 RENT_GOLD = 5             # a little to take the public Airstream out
 CAMPER_KEY_ID = "camper_key"
-CAMPER_KEY_ROOM = "slick_backroom"  # where a spare key keeps turning up
+PUBLIC_SHIP_ID = "public_airstream"
+PUBLIC_OWNER = "Public"
+SHIPS_PATH = Path("saves/.ships.json")
 
 
 class Broadcast:
@@ -126,7 +132,8 @@ class StarSystem:
 @dataclass
 class Ship:
     name: str
-    owner: str = "Public"
+    owner: str = PUBLIC_OWNER
+    ship_id: str = ""
     cockpit_room: str = ""
     location: str = ""          # pad room id while docked
     lastdoc: str = ""
@@ -205,6 +212,11 @@ def _facing(ship: Ship, target: Ship) -> bool:
 def _has_key(player) -> bool:
     """True if the player is carrying the camper's padlock key."""
     return any(item.id == CAMPER_KEY_ID for item in getattr(player, "inventory", []))
+
+
+def _owner_token(name: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9]+", "_", (name or "").strip()).strip("_").lower()
+    return token or "owner"
 
 
 # ---------------------------------------------------------------------------
@@ -292,30 +304,12 @@ REMOTE_PADS = (
 )
 
 FISHING_HOLE_IDS = frozenset(f"{pad['id']}_hole" for pad in REMOTE_PADS)
+REMOTE_PAD_IDS = frozenset(pad["id"] for pad in REMOTE_PADS)
 
 GARAGE_ROOM_IDS = frozenset({
     GARAGE_ROOM_ID,
     CAMPER_ROOM_ID,
-}) | {pad["id"] for pad in REMOTE_PADS} | FISHING_HOLE_IDS
-
-
-def place_camper_key(rooms: Dict[str, "Room"]) -> bool:
-    """
-    Leave a padlock key on the floor of Slick's back room.
-
-    Called on every ground-loot reset, so the key comes back after someone
-    pockets it. The back room is already gated behind Curt, which is as much
-    of a lock as the key itself needs.
-    """
-    from items import CAMPER_KEY, create_item_copy
-
-    room = rooms.get(CAMPER_KEY_ROOM)
-    if room is None:
-        return False
-    if any(item.id == CAMPER_KEY_ID for item in room.items):
-        return False
-    room.items.append(create_item_copy(CAMPER_KEY, roll_stats=False, condition=4))
-    return True
+}) | REMOTE_PAD_IDS | FISHING_HOLE_IDS
 
 
 def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
@@ -431,7 +425,8 @@ def default_starsystems() -> List[StarSystem]:
 def default_ships(systems: List[StarSystem]) -> List[Ship]:
     ship = Ship(
         name="Silver Airstream",
-        owner="Public",
+        owner=PUBLIC_OWNER,
+        ship_id=PUBLIC_SHIP_ID,
         cockpit_room=CAMPER_ROOM_ID,
         location=GARAGE_ROOM_ID,
         lastdoc=GARAGE_ROOM_ID,
@@ -455,6 +450,152 @@ class GarageEngine:
         for system in self.systems:
             for pad in system.pads():
                 self._pad_index[pad.room_id] = pad
+        self.load_ships()
+        self.ensure_cockpit_rooms()
+
+    def attach_rooms(self, rooms: Dict[str, "Room"]) -> None:
+        """Keep ship interiors after a world rebuild."""
+        self.rooms = rooms
+        self.ensure_cockpit_rooms()
+
+    def owned_ship_for(self, player_name: str) -> Optional[Ship]:
+        for ship in self.ships:
+            if ship.owner.lower() == player_name.lower() and ship.owner != PUBLIC_OWNER:
+                return ship
+        return None
+
+    def can_create_owned_ship_at(self, room_id: str) -> bool:
+        return room_id in REMOTE_PAD_IDS
+
+    def create_owned_ship(self, player, pad_room_id: str) -> Optional[Ship]:
+        """Foundation for later dealers: one personal ship, off Alpha Prime only."""
+        if self.owned_ship_for(player.name):
+            return None
+        if not self.can_create_owned_ship_at(pad_room_id):
+            return None
+        token = _owner_token(player.name)
+        cockpit_id = f"camper_interior_{token}"
+        ship = Ship(
+            name=f"{player.name}'s Airstream",
+            owner=player.name,
+            ship_id=f"ship_{token}",
+            cockpit_room=cockpit_id,
+            location=pad_room_id,
+            lastdoc=pad_room_id,
+            home="Alpha",
+            locked=True,
+            hatch_open=False,
+            state=ShipState.DOCKED,
+        )
+        self.ships.append(ship)
+        self.ensure_cockpit_rooms()
+        self.save_ships()
+        return ship
+
+    def ensure_cockpit_rooms(self) -> None:
+        from world import Room
+
+        template = self.rooms.get(CAMPER_ROOM_ID)
+        description = (
+            template.description
+            if template
+            else "The camper's dinette has been torn out and replaced with a console."
+        )
+        for ship in self.ships:
+            if not ship.cockpit_room:
+                continue
+            if ship.cockpit_room in self.rooms:
+                continue
+            self.rooms[ship.cockpit_room] = Room(
+                id=ship.cockpit_room,
+                name=f"Inside {ship.name}",
+                description=description,
+                exits={},
+                items=[],
+                is_water=False,
+            )
+
+    def _ship_to_save(self, ship: Ship) -> Dict:
+        dock = ship.lastdoc or ship.location or GARAGE_ROOM_ID
+        if dock not in self._pad_index:
+            dock = GARAGE_ROOM_ID
+        return {
+            "ship_id": ship.ship_id or PUBLIC_SHIP_ID,
+            "name": ship.name,
+            "owner": ship.owner,
+            "cockpit_room": ship.cockpit_room,
+            "location": dock,
+            "lastdoc": dock,
+            "locked": bool(ship.locked),
+            "hatch_open": False,
+            "hull": ship.hull,
+            "maxhull": ship.maxhull,
+            "shield": ship.shield,
+            "maxshield": ship.maxshield,
+            "missiles": ship.missiles,
+            "maxmissiles": ship.maxmissiles,
+            "home": ship.home,
+        }
+
+    def save_ships(self) -> None:
+        SHIPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"ships": [self._ship_to_save(ship) for ship in self.ships]}
+        SHIPS_PATH.write_text(json.dumps(payload, indent=2))
+
+    def load_ships(self) -> None:
+        if not SHIPS_PATH.exists():
+            return
+        try:
+            payload = json.loads(SHIPS_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        saved = payload.get("ships") or []
+        by_id = {ship.ship_id: ship for ship in self.ships if ship.ship_id}
+        for entry in saved:
+            ship_id = entry.get("ship_id") or ""
+            dock = entry.get("lastdoc") or entry.get("location") or GARAGE_ROOM_ID
+            if dock not in self._pad_index:
+                dock = GARAGE_ROOM_ID
+            existing = by_id.get(ship_id)
+            if existing is None and ship_id == PUBLIC_SHIP_ID:
+                existing = next(
+                    (ship for ship in self.ships if ship.owner == PUBLIC_OWNER),
+                    None,
+                )
+            if existing is not None:
+                existing.location = dock
+                existing.lastdoc = dock
+                existing.locked = bool(entry.get("locked", True))
+                existing.hatch_open = False
+                existing.state = ShipState.DOCKED
+                existing.hull = int(entry.get("hull", existing.hull))
+                existing.shield = int(entry.get("shield", 0))
+                existing.missiles = int(entry.get("missiles", existing.missiles))
+                existing.orbit = None
+                existing.starsystem = None
+                existing.currspeed = 0
+                continue
+            if entry.get("owner") in ("", PUBLIC_OWNER):
+                continue
+            ship = Ship(
+                name=entry.get("name") or "Airstream",
+                owner=entry.get("owner") or PUBLIC_OWNER,
+                ship_id=ship_id or f"ship_{_owner_token(entry.get('owner', 'owner'))}",
+                cockpit_room=entry.get("cockpit_room") or f"camper_interior_{_owner_token(entry.get('owner', 'owner'))}",
+                location=dock,
+                lastdoc=dock,
+                locked=bool(entry.get("locked", True)),
+                hatch_open=False,
+                hull=int(entry.get("hull", 500)),
+                maxhull=int(entry.get("maxhull", 500)),
+                shield=int(entry.get("shield", 0)),
+                maxshield=int(entry.get("maxshield", 250)),
+                missiles=int(entry.get("missiles", 8)),
+                maxmissiles=int(entry.get("maxmissiles", 8)),
+                home=entry.get("home") or "Alpha",
+                state=ShipState.DOCKED,
+            )
+            self.ships.append(ship)
 
     def system_named(self, name: str) -> Optional[StarSystem]:
         needle = name.strip().lower()
@@ -514,6 +655,8 @@ class GarageEngine:
         if self._ticks % 2 == 0:
             self._update_space(notes)
         self._apply_orbits(notes)
+        if self._ticks % COORD_UPDATE_SECONDS == 0:
+            self._echo_positions(notes)
         return notes
 
     def _echo_cockpit(self, ship: Ship, message: str, notes: List[Broadcast]) -> None:
@@ -522,6 +665,25 @@ class GarageEngine:
     def _echo_pad(self, room_id: str, message: str, notes: List[Broadcast]) -> None:
         if room_id:
             notes.append(Broadcast(room_id, message))
+
+    def _echo_positions(self, notes: List[Broadcast]) -> None:
+        """Occasional cockpit readout so flying isn't silent."""
+        skip = (
+            ShipState.DOCKED, ShipState.DISABLED,
+            ShipState.LAUNCH, ShipState.LAUNCH_2,
+            ShipState.LAND, ShipState.LAND_2,
+            ShipState.HYPERSPACE,
+        )
+        for ship in self.ships:
+            if ship.state in skip or not ship.starsystem:
+                continue
+            line = (
+                f"Speed: {ship.currspeed}  Coords: "
+                f"{ship.vx:.0f} {ship.vy:.0f} {ship.vz:.0f}"
+            )
+            if ship.orbit:
+                line += f"  (orbit {ship.orbit})"
+            self._echo_cockpit(ship, line, notes)
 
     def _move_ships(self, notes: List[Broadcast]) -> None:
         for ship in self.ships:
@@ -693,7 +855,7 @@ class GarageEngine:
         ship.lastdoc = pad.room_id
         ship.currspeed = 0
         ship.state = ShipState.DOCKED
-        if ship.owner == "Public":
+        if self._is_public(ship):
             ship.missiles = ship.maxmissiles
             ship.hull = ship.maxhull
             ship.shield = 0
@@ -701,6 +863,7 @@ class GarageEngine:
         self._echo_cockpit(ship, "Landing sequence complete.", notes)
         self._echo_cockpit(ship, "You feel a slight thud as the ship sets down.", notes)
         self._echo_pad(pad.room_id, f"{ship.name} rolls back in and settles.", notes)
+        self.save_ships()
 
     # -- commands --------------------------------------------------------------
 
@@ -813,22 +976,39 @@ class GarageEngine:
             return None, self._result(result_cls, "There's nothing here to {}.".format(verb))
         return None, self._result(result_cls, "{} which one?".format(verb.capitalize()))
 
+    def _is_public(self, ship: Ship) -> bool:
+        return ship.owner == PUBLIC_OWNER
+
+    def _controls_lock(self, player, ship: Ship) -> bool:
+        if self._is_public(ship):
+            return _has_key(player)
+        return ship.owner.lower() == player.name.lower()
+
     def cmd_unlock(self, player, args, result_cls):
         ship, err = self._ship_at_hand(player, args, result_cls, "unlock")
         if err:
             return err
         if not ship.locked:
             return self._result(result_cls, f"The {ship.name} is already unlocked.")
-        if not _has_key(player):
-            return self._result(
-                result_cls,
-                "The padlock is rusted but solid. You'd need the key for it.",
-            )
+        if not self._controls_lock(player, ship):
+            if self._is_public(ship):
+                return self._result(
+                    result_cls,
+                    "The padlock is rusted but solid. You'd need the key for it.",
+                )
+            return self._result(result_cls, "That's not your camper.")
         ship.locked = False
+        self.save_ships()
+        if self._is_public(ship):
+            message = (
+                f"The key turns stiffly and the padlock springs open.\n"
+                f"You slip it off the latch of the {ship.name}."
+            )
+        else:
+            message = f"You unlock your {ship.name}."
         return self._result(
             result_cls,
-            f"The key turns stiffly and the padlock springs open.\n"
-            f"You slip it off the latch of the {ship.name}.",
+            message,
             [Broadcast(ship.location, f"{player.name} unlocks the {ship.name}.")],
         )
 
@@ -838,14 +1018,17 @@ class GarageEngine:
             return err
         if ship.locked:
             return self._result(result_cls, f"The {ship.name} is already locked.")
-        if not _has_key(player):
-            return self._result(result_cls, "You don't have the key for that padlock.")
+        if not self._controls_lock(player, ship):
+            if self._is_public(ship):
+                return self._result(result_cls, "You don't have the key for that padlock.")
+            return self._result(result_cls, "That's not your camper.")
         if ship.state != ShipState.DOCKED:
             return self._result(result_cls, "Not while it's out on the road.")
         if self.rooms.get(ship.cockpit_room) and self.rooms[ship.cockpit_room].players:
             return self._result(result_cls, "Someone is still inside.")
         ship.hatch_open = False
         ship.locked = True
+        self.save_ships()
         return self._result(
             result_cls,
             f"You snap the padlock shut on the {ship.name}.",
@@ -946,7 +1129,7 @@ class GarageEngine:
             return err
         if ship.state not in (ShipState.DOCKED, ShipState.DISABLED):
             return self._result(result_cls, "The ship is not docked right now.")
-        if ship.owner == "Public":
+        if self._is_public(ship):
             if player.gold < RENT_GOLD:
                 return self._result(
                     result_cls,
@@ -964,6 +1147,7 @@ class GarageEngine:
         ship.lastdoc = ship.location
         ship.state = ShipState.LAUNCH
         ship.currspeed = ship.realspeed
+        self.save_ships()
         self._echo_pad(ship.location, f"{ship.name} begins to launch.", notes)
         self._echo_cockpit(ship, "The ship hums as it lifts off the ground.", notes)
         return self._result(
@@ -1241,6 +1425,7 @@ class GarageEngine:
         ship.currspeed = 0
         ship.target = None
         ship.hatch_open = False
+        self.save_ships()
 
     def cmd_recharge(self, player, args, result_cls):
         ship, err = self._need_ship(player, result_cls)

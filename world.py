@@ -7,16 +7,19 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from camper import GARAGE_ROOM_IDS, add_garage_to_world, place_camper_key
+from camper import GARAGE_ROOM_IDS, add_garage_to_world
 from items import (
     Item, TACKLE_BOX, OLD_BOOT, PLASTIC_WORM, NIGHTCRAWLERS,
     MINNOWS, WEARABLE_ITEMS, create_item_copy,
 )
 
 
+TRUCK_ROOM_ID = "parking_lot"
+
 # Rooms that never get random ground loot
 NO_GROUND_LOOT_ROOMS = frozenset({
     "store", "slick_store", "slick_backroom", "jail", "bubba_workshop",
+    TRUCK_ROOM_ID,
 }) | GARAGE_ROOM_IDS
 
 # Common ground finds (item template, relative weight)
@@ -183,8 +186,6 @@ def reset_ground_items(rooms: Dict[str, Room]) -> Dict[str, int]:
         room.items.append(create_item_copy(clothing))
         clothing_count += 1
 
-    place_camper_key(rooms)
-
     return {"common": common_count, "clothing": clothing_count}
 
 
@@ -249,8 +250,41 @@ match is right.""",
         description="""A winding dirt path cuts through tall oak trees. Sunlight filters 
 through the canopy, creating dappled shadows on the ground. You can 
 hear birds singing and the distant sound of water. The trail continues 
-south toward the lake.""",
-        exits={"north": "store_porch", "south": "trail_middle"},
+south toward the lake. Another path heads east through the woods.""",
+        exits={"north": "store_porch", "south": "trail_middle", "east": "trail_east_1"},
+        items=[],
+        is_water=False
+    )
+
+    rooms["trail_east_1"] = Room(
+        id="trail_east_1",
+        name="Shady Trail (East)",
+        description="""The woods thicken east of the main trail. Needles and last year's 
+leaves muffle your steps. Through the trees you can still hear the 
+lake, but the path keeps going east.""",
+        exits={"west": "trail_north", "east": "trail_east_2"},
+        items=[],
+        is_water=False
+    )
+
+    rooms["trail_east_2"] = Room(
+        id="trail_east_2",
+        name="Woods Trail",
+        description="""The trail levels out in a quiet stand of pine. Tire ruts cut north 
+toward a clearing, and the way back west returns to the familiar 
+shady path.""",
+        exits={"west": "trail_east_1", "north": TRUCK_ROOM_ID},
+        items=[],
+        is_water=False
+    )
+
+    rooms[TRUCK_ROOM_ID] = Room(
+        id=TRUCK_ROOM_ID,
+        name="Gravel Parking Lot",
+        description="""A small gravel lot sits in a gap in the trees. Weeds push up 
+through old oil stains. One battered pickup is always here when 
+you are — nobody else's, just yours.""",
+        exits={"south": "trail_east_2"},
         items=[],
         is_water=False
     )
