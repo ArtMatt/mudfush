@@ -23,6 +23,7 @@ import json
 import math
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -72,6 +73,9 @@ SKIPJACK_STOCK = {"engine": 100, "hyper": 100, "cargo": 25}
 DELL_PAD_ID = "beta_forge"       # Dell buys and sells upgrade modules here
 MODULE_BUYBACK = 0.5             # Dell pays half for a loose module
 CARGO_WORDS = frozenset({"cargo", "hold", "cargohold"})
+CARGO_CYCLE_SECONDS = 3 * 60 * 60
+# Older saves parked on Alpha Minor before it became Europa.
+DOCK_ALIASES = {"alpha_minor": "europa"}
 
 
 class Broadcast:
@@ -279,17 +283,19 @@ def _owner_token(name: str) -> str:
 GARAGE_ROOM_ID = "slick_garage"
 CAMPER_ROOM_ID = "camper_interior"
 
-# Pads besides the garage, each with a fishing hole off the east side.
+# Pads besides the garage. Fishing pads grow a hole to the east. A pad with
+# a "buyer" is a dry market: that NPC buys one species from a cargo hold.
 REMOTE_PADS = (
     {
-        "id": "alpha_minor",
-        "name": "Alpha Minor Research Pad",
+        "id": "europa",
+        "name": "Europa Landing",
         "description": (
-            "A quiet research pad on Alpha Minor. The sky is a hard black. "
-            "East of the pad, a chain-link walkway drops toward a dark pool "
-            "that shouldn't be liquid."
+            "A landing pad scraped into Europa's ice. Jupiter's bulk hangs "
+            "overhead, and the sky is a hard black. East of the pad, a "
+            "chain-link walkway drops toward a dark pool that shouldn't "
+            "be liquid."
         ),
-        "hole_name": "Alpha Minor Fishing Hole",
+        "hole_name": "Europa Fishing Hole",
         "hole_description": (
             "A round basin of black water sits under a grated catwalk. The "
             "surface is too still, then dimples as if something large turned "
@@ -298,13 +304,13 @@ REMOTE_PADS = (
     },
     {
         "id": "beta_haven",
-        "name": "Beta Haven Spaceport",
+        "name": "Haven Spaceport",
         "description": (
-            "Beta Haven's landing pad. Warm wind rolls off a rust-colored "
-            "plain. East of the tarmac, a ditch holds water the color of "
-            "old pennies."
+            "Haven's landing pad, under the dull red coal of Betelgeuse. "
+            "Warm wind rolls off a rust-colored plain. East of the tarmac, "
+            "a ditch holds water the color of old pennies."
         ),
-        "hole_name": "Beta Haven Fishing Hole",
+        "hole_name": "Haven Fishing Hole",
         "hole_description": (
             "Copper-stained water fills a cut in the plain. It smells like "
             "wet metal and algae. Things flick just under the film. You "
@@ -313,12 +319,13 @@ REMOTE_PADS = (
     },
     {
         "id": "beta_forge",
-        "name": "Beta Forge Cargo Pad",
+        "name": "Forge Cargo Pad",
         "description": (
-            "A scarred cargo pad. Furnaces glow on the horizon. East, a "
-            "slag trench has filled with water that steams in the heat."
+            "A scarred cargo pad under Betelgeuse. Furnaces glow on the "
+            "horizon. East, a slag trench has filled with water that steams "
+            "in the heat."
         ),
-        "hole_name": "Beta Forge Fishing Hole",
+        "hole_name": "Forge Fishing Hole",
         "hole_description": (
             "The slag trench is a fishing hole now, somehow. The water is "
             "warm and cloudy, and heat-shimmer makes the far bank crawl. "
@@ -327,13 +334,13 @@ REMOTE_PADS = (
     },
     {
         "id": "gamma_reach",
-        "name": "Gamma Reach Spaceport",
+        "name": "Reach Spaceport",
         "description": (
-            "A lonely pad at Gamma Reach. The star here is a cold white pin. "
+            "A lonely pad at Reach, with Vega a cold white pin overhead. "
             "East, a shallow crater holds a sheet of water that reflects the "
             "wrong sky."
         ),
-        "hole_name": "Gamma Reach Fishing Hole",
+        "hole_name": "Reach Fishing Hole",
         "hole_description": (
             "The crater pool is glassy and wrong. Your reflection lags a "
             "half-second behind you. Rings spread from casts that haven't "
@@ -342,21 +349,112 @@ REMOTE_PADS = (
     },
     {
         "id": "gamma_ice",
-        "name": "Gamma Ice Outpost",
+        "name": "Ice Outpost",
         "description": (
-            "Ice underfoot. The outpost is a single heated shack and this "
-            "pad. East, someone has kept a hole chopped in the ice."
+            "Ice underfoot, Vega small and sharp overhead. The outpost is a "
+            "single heated shack and this pad. East, someone has kept a hole "
+            "chopped in the ice."
         ),
-        "hole_name": "Gamma Ice Fishing Hole",
+        "hole_name": "Ice Fishing Hole",
         "hole_description": (
             "A square hole in the ice, edges glazed from repeated thawing. "
             "The water below is darker and warmer than it has any right to "
             "be. You could FISH here."
         ),
     },
+    {
+        "id": "sirius_brightwater",
+        "name": "Whiteflare Pad",
+        "description": (
+            "A pale pad on Whiteflare. Sirius burns white-blue and throws "
+            "hard shadows across bare rock. There is no water here."
+        ),
+    },
+    {
+        "id": "sirius_quay",
+        "name": "Cinder Lot",
+        "description": (
+            "A cinder lot with crates stacked under an awning. The air "
+            "smells like a market, and there is no water anywhere."
+        ),
+        "buyer": {
+            "name": "Mara",
+            "species": ("bluegill", "walleye", "pike"),
+            "blurb": (
+                "Mara buys fish out of cargo holds and nothing else. She "
+                "posts one species at a time and will not take a mixed load."
+            ),
+        },
+    },
+    {
+        "id": "rigel_bluewater",
+        "name": "Bluestone Pad",
+        "description": (
+            "Bluestone's pad sits on a shelf of blue stone. Rigel is a hard "
+            "blue-white point. The stone is dry all the way to the horizon."
+        ),
+    },
+    {
+        "id": "rigel_exchange",
+        "name": "Rigel Exchange",
+        "description": (
+            "A windowless exchange hall on a waterless rock. Scales are set "
+            "into the floor, and the only weather is the ventilator."
+        ),
+        "buyer": {
+            "name": "Holt",
+            "species": ("pebble_perch", "trout", "moon_darter"),
+            "blurb": (
+                "Holt calls prices through a grate. He buys one species from "
+                "a cargo hold, and he wants the whole hold to match."
+            ),
+        },
+    },
+    {
+        "id": "deneb_swanpool",
+        "name": "Swanrock Pad",
+        "description": (
+            "Swanrock's pad is a ring of decking on bare stone, with Deneb "
+            "bright in the Swan. Dust blows across the circle."
+        ),
+    },
+    {
+        "id": "deneb_wharf",
+        "name": "Deneb Yard",
+        "description": (
+            "A yard of cranes and crates on dry rock. The only fish here "
+            "are already dead and priced."
+        ),
+        "buyer": {
+            "name": "Bornkt",
+            "species": ("bass", "catfish", "sting_puffer"),
+            "blurb": (
+                "Bornkt keeps a chalkboard of the one species she is buying. "
+                "A mixed hold is a wasted trip."
+            ),
+        },
+    },
+    {
+        "id": "void_drift",
+        "name": "Drift Station",
+        "description": (
+            "A station hung in a patch of sky with no star. The docking arm "
+            "is the whole port. There is no water, no weather, and no shore."
+        ),
+        "buyer": {
+            "name": "Nix",
+            "species": ("mud_carp", "zen_guppy", "legendary_carp"),
+            "blurb": (
+                "Nix buys odd fish out of cargo holds, one species at a time. "
+                "She will not pick through a mixed load."
+            ),
+        },
+    },
 )
 
-FISHING_HOLE_IDS = frozenset(f"{pad['id']}_hole" for pad in REMOTE_PADS)
+FISHING_HOLE_IDS = frozenset(
+    f"{pad['id']}_hole" for pad in REMOTE_PADS if pad.get("hole_name")
+)
 REMOTE_PAD_IDS = frozenset(pad["id"] for pad in REMOTE_PADS)
 
 GARAGE_ROOM_IDS = frozenset({
@@ -395,36 +493,43 @@ def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
 
     stops = REMOTE_PADS
     for pad in stops:
-        hole_id = f"{pad['id']}_hole"
         description = (
             pad["description"]
             + "\n\nA weathered placard by the tarmac reads: SKIPJACK HULLS "
             "BOUGHT AND SOLD. Type 'list' for terms."
         )
         npcs = []
+        exits = {}
         if pad["id"] == DELL_PAD_ID:
             description += (
                 "\n\nDell runs a parts stall out of a shipping container "
                 "here, engines and hyperdrive cores racked behind her like "
                 "cordwood. She buys and sells ship upgrade modules."
             )
-            npcs = ["Dell"]
+            npcs.append("Dell")
+        buyer = pad.get("buyer")
+        if buyer:
+            description += f"\n\n{buyer['blurb']}"
+            npcs.append(buyer["name"])
+        if pad.get("hole_name"):
+            hole_id = f"{pad['id']}_hole"
+            exits["east"] = hole_id
+            rooms[hole_id] = Room(
+                id=hole_id,
+                name=pad["hole_name"],
+                description=pad["hole_description"],
+                exits={"west": pad["id"]},
+                items=[],
+                is_water=True,
+            )
         rooms[pad["id"]] = Room(
             id=pad["id"],
             name=pad["name"],
             description=description,
-            exits={"east": hole_id},
+            exits=exits,
             items=[],
             is_water=False,
             npcs=npcs,
-        )
-        rooms[hole_id] = Room(
-            id=hole_id,
-            name=pad["hole_name"],
-            description=pad["hole_description"],
-            exits={"west": pad["id"]},
-            items=[],
-            is_water=True,
         )
 
     rooms[CAMPER_ROOM_ID] = Room(
@@ -448,45 +553,133 @@ def add_garage_to_world(rooms: Dict[str, "Room"]) -> None:
     )
 
 
+def buyer_species_id(buyer: dict, now: Optional[float] = None) -> str:
+    """The one species this buyer wants during the current 3-hour block."""
+    now = time.time() if now is None else now
+    species = buyer["species"]
+    return species[int(now // CARGO_CYCLE_SECONDS) % len(species)]
+
+
+def cycle_remaining(now: Optional[float] = None) -> int:
+    now = time.time() if now is None else now
+    return CARGO_CYCLE_SECONDS - (int(now) % CARGO_CYCLE_SECONDS)
+
+
+def _format_remaining(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def _fish_named(fish_id: str):
+    from items import CATCHABLE_FISH
+
+    for fish, _weight in CATCHABLE_FISH:
+        if fish.id == fish_id:
+            return fish
+    return None
+
+
+def _pad_entry(room_id: str) -> dict:
+    for pad in REMOTE_PADS:
+        if pad["id"] == room_id:
+            return pad
+    raise KeyError(room_id)
+
+
+def _landing(room_id: str, x: int, y: int, z: int) -> LandingPad:
+    return LandingPad(_pad_entry(room_id)["name"], room_id, x, y, z)
+
+
 def default_starsystems() -> List[StarSystem]:
-    """The Alpha / Beta / Gamma layout the camper's route runs through."""
-    alpha = StarSystem(
-        name="Alpha", galaxy_x=0, galaxy_y=0,
-        stars=[Star("Alpha Sun", -7000, 0, 0)],
+    """Real stars on the galactic plane, plus one starless void."""
+    sol = StarSystem(
+        name="Sol", galaxy_x=0, galaxy_y=0,
+        stars=[Star("Sol", -7000, 0, 0)],
         planets=[
             Planet("Alpha Prime", 1000, 1000, 1000, [
                 LandingPad("Back Garage", GARAGE_ROOM_ID, 1000, 1000, 1000),
             ]),
-            Planet("Alpha Minor", -1800, 900, 2200, [
-                LandingPad("Alpha Minor Research Pad", "alpha_minor", -1800, 900, 2200),
+            Planet("Europa", -1800, 900, 2200, [
+                _landing("europa", -1800, 900, 2200),
             ]),
         ],
     )
-    beta = StarSystem(
-        name="Beta", galaxy_x=5000, galaxy_y=1200,
-        stars=[Star("Beta Star", 0, -7000, 0)],
+    betelgeuse = StarSystem(
+        name="Betelgeuse", galaxy_x=5000, galaxy_y=1200,
+        stars=[Star("Betelgeuse", 0, -7000, 0)],
         planets=[
-            Planet("Beta Haven", 1400, -900, 1700, [
-                LandingPad("Beta Haven Spaceport", "beta_haven", 1400, -900, 1700),
+            Planet("Haven", 1400, -900, 1700, [
+                _landing("beta_haven", 1400, -900, 1700),
             ]),
-            Planet("Beta Forge", -2200, 1300, -1200, [
-                LandingPad("Beta Forge Cargo Pad", "beta_forge", -2200, 1300, -1200),
+            Planet("Forge", -2200, 1300, -1200, [
+                _landing("beta_forge", -2200, 1300, -1200),
             ]),
         ],
     )
-    gamma = StarSystem(
-        name="Gamma", galaxy_x=-3200, galaxy_y=4800,
-        stars=[Star("Gamma Star", 0, 0, -7000)],
+    vega = StarSystem(
+        name="Vega", galaxy_x=-3200, galaxy_y=4800,
+        stars=[Star("Vega", 0, 0, -7000)],
         planets=[
-            Planet("Gamma Reach", 1800, 1400, -1000, [
-                LandingPad("Gamma Reach Spaceport", "gamma_reach", 1800, 1400, -1000),
+            Planet("Reach", 1800, 1400, -1000, [
+                _landing("gamma_reach", 1800, 1400, -1000),
             ]),
-            Planet("Gamma Ice", -1600, -1800, 1600, [
-                LandingPad("Gamma Ice Outpost", "gamma_ice", -1600, -1800, 1600),
+            Planet("Ice", -1600, -1800, 1600, [
+                _landing("gamma_ice", -1600, -1800, 1600),
             ]),
         ],
     )
-    return [alpha, beta, gamma]
+    sirius = StarSystem(
+        name="Sirius", galaxy_x=2000, galaxy_y=-4500,
+        stars=[Star("Sirius", 7000, 0, 0)],
+        planets=[
+            Planet("Whiteflare", 1400, -900, 1700, [
+                _landing("sirius_brightwater", 1400, -900, 1700),
+            ]),
+            Planet("Cinder", -2200, 1300, -1200, [
+                _landing("sirius_quay", -2200, 1300, -1200),
+            ]),
+        ],
+    )
+    rigel = StarSystem(
+        name="Rigel", galaxy_x=-6000, galaxy_y=-2000,
+        stars=[Star("Rigel", 0, 7000, 0)],
+        planets=[
+            Planet("Bluestone", 1800, 1400, -1000, [
+                _landing("rigel_bluewater", 1800, 1400, -1000),
+            ]),
+            Planet("Exchange", -1600, -1800, 1600, [
+                _landing("rigel_exchange", -1600, -1800, 1600),
+            ]),
+        ],
+    )
+    deneb = StarSystem(
+        name="Deneb", galaxy_x=4500, galaxy_y=5500,
+        stars=[Star("Deneb", 0, 0, 7000)],
+        planets=[
+            Planet("Swanrock", 1200, 800, 1500, [
+                _landing("deneb_swanpool", 1200, 800, 1500),
+            ]),
+            Planet("Yard", -2000, 400, -900, [
+                _landing("deneb_wharf", -2000, 400, -900),
+            ]),
+        ],
+    )
+    void = StarSystem(
+        name="Void", galaxy_x=-1500, galaxy_y=-5500,
+        stars=[],
+        planets=[
+            Planet("Drift", 0, 0, 0, [
+                _landing("void_drift", 0, 0, 0),
+            ]),
+        ],
+    )
+    return [sol, betelgeuse, vega, sirius, rigel, deneb, void]
 
 
 def default_ships(systems: List[StarSystem]) -> List[Ship]:
@@ -497,7 +690,7 @@ def default_ships(systems: List[StarSystem]) -> List[Ship]:
         cockpit_room=CAMPER_ROOM_ID,
         location=GARAGE_ROOM_ID,
         lastdoc=GARAGE_ROOM_ID,
-        home="Alpha",
+        home="Sol",
     )
     return [ship]
 
@@ -550,7 +743,7 @@ class GarageEngine:
             hull_type=HULL_SKIPJACK,
             location=pad_room_id,
             lastdoc=pad_room_id,
-            home="Alpha",
+            home="Sol",
             locked=True,
             hatch_open=False,
             state=ShipState.DOCKED,
@@ -670,6 +863,7 @@ class GarageEngine:
         for entry in saved:
             ship_id = entry.get("ship_id") or ""
             dock = entry.get("lastdoc") or entry.get("location") or GARAGE_ROOM_ID
+            dock = DOCK_ALIASES.get(dock, dock)
             if dock not in self._pad_index:
                 dock = GARAGE_ROOM_ID
             existing = by_id.get(ship_id)
@@ -727,7 +921,7 @@ class GarageEngine:
                 maxshield=int(entry.get("maxshield", 250)),
                 missiles=int(entry.get("missiles", 8)),
                 maxmissiles=int(entry.get("maxmissiles", 8)),
-                home=entry.get("home") or "Alpha",
+                home=entry.get("home") or "Sol",
                 state=ShipState.DOCKED,
                 modules=modules,
                 cargo=cargo,
@@ -735,11 +929,17 @@ class GarageEngine:
             ship.apply_modules()
             self.ships.append(ship)
 
-    def system_named(self, name: str) -> Optional[StarSystem]:
+    def systems_matching(self, name: str) -> List[StarSystem]:
+        """Systems whose name starts with this abbreviation. 'bet' is Betelgeuse."""
         needle = name.strip().lower()
-        for system in self.systems:
-            if system.name.lower().startswith(needle):
-                return system
+        if not needle:
+            return []
+        return [system for system in self.systems if system.name.lower().startswith(needle)]
+
+    def system_named(self, name: str) -> Optional[StarSystem]:
+        hits = self.systems_matching(name)
+        if len(hits) == 1:
+            return hits[0]
         return None
 
     def ship_named(self, name: str) -> Optional[Ship]:
@@ -1466,9 +1666,13 @@ class GarageEngine:
                 dist = _galaxy_distance(ship.starsystem, system)
                 lines.append(f"  {system.name:20} jump-distance {dist}")
             return self._result(result_cls, "\n".join(lines))
-        dest = self.system_named(parts[0])
-        if dest is None:
+        hits = self.systems_matching(parts[0])
+        if not hits:
             return self._result(result_cls, "No such starsystem.")
+        if len(hits) > 1:
+            names = ", ".join(system.name for system in hits)
+            return self._result(result_cls, f"Which system? {names}.")
+        dest = hits[0]
         coords = parts[1:4]
         if len(coords) < 3:
             return self._result(result_cls, "Format: Calculate <starsystem> <entry x> <entry y> <entry z>")
@@ -1671,6 +1875,19 @@ class GarageEngine:
                     f"  {item.name:<24} {item.value:>6}g   {MODULE_SLOT_LABELS[slot]}"
                 )
             lines.append("  Stock parts are never for sale. Install what you buy in your hold.")
+        buyer = _pad_entry(room_id).get("buyer")
+        if buyer:
+            wanted = _fish_named(buyer_species_id(buyer))
+            species_name = wanted.name if wanted else buyer_species_id(buyer)
+            lines.append("")
+            lines.append(
+                f"{buyer['name'].upper()} is buying {species_name} "
+                f"for the next {_format_remaining(cycle_remaining())}."
+            )
+            lines.append(
+                f"  The whole hold has to be {species_name}. "
+                "A mixed load is refused. Type 'sell cargo'."
+            )
         lines.append("")
         lines.append(f"Your gold: {player.gold}")
         return "\n".join(lines)
@@ -1710,7 +1927,7 @@ class GarageEngine:
             )
         if room_id != DELL_PAD_ID:
             return self._result(
-                result_cls, "Only hulls change hands here. Dell at Beta Forge sells modules."
+                result_cls, "Only hulls change hands here. Dell at the Forge sells modules."
             )
         match = next(
             (item for item in MODULE_ITEMS.values()
@@ -1737,6 +1954,8 @@ class GarageEngine:
         query = (query or "").strip().lower()
         if not query:
             return self._result(result_cls, self.pad_listing(player, room_id))
+        if query in CARGO_WORDS or query == "fish":
+            return self.sell_cargo(player, room_id, result_cls)
         if self._names_ship(query):
             ship = self.owned_ship_for(player.name)
             if ship is None:
@@ -1764,7 +1983,7 @@ class GarageEngine:
             )
         if room_id != DELL_PAD_ID:
             return self._result(
-                result_cls, "Only hulls change hands here. Dell at Beta Forge buys modules."
+                result_cls, "Only hulls change hands here. Dell at the Forge buys modules."
             )
         item = player.find_item(query)
         if item is None or item.item_type != ItemType.MODULE:
@@ -1783,6 +2002,51 @@ class GarageEngine:
 
     # -- cargo hold ----------------------------------------------------------
 
+    def sell_cargo(self, player, room_id: str, result_cls):
+        """Sell the whole hold to the pad's buyer, or refuse a mixed load."""
+        from items import is_ancient_fish_id
+
+        try:
+            buyer = _pad_entry(room_id).get("buyer")
+        except KeyError:
+            buyer = None
+        if not buyer:
+            return self._result(result_cls, "Nobody here buys fish out of a hold.")
+        ship, err = self.cargo_ship_for(player)
+        if err:
+            return self._result(result_cls, err)
+        if ship.location != room_id or ship.state != ShipState.DOCKED:
+            return self._result(result_cls, "Your ship isn't parked on this pad.")
+        if not ship.cargo:
+            return self._result(result_cls, "The hold is empty.")
+        wanted_id = buyer_species_id(buyer)
+        wanted = _fish_named(wanted_id)
+        species_name = wanted.name if wanted else wanted_id
+        odd = [
+            item for item in ship.cargo
+            if item.id != wanted_id or is_ancient_fish_id(item.id)
+        ]
+        if odd:
+            names = ", ".join(item.display_name for item in odd[:4])
+            extra = "" if len(odd) <= 4 else f" (+{len(odd) - 4} more)"
+            return self._result(
+                result_cls,
+                f"{buyer['name']} wants only {species_name}, the whole hold. "
+                f"Still in there: {names}{extra}.",
+            )
+        total = sum(max(1, int(item.value or 0)) for item in ship.cargo)
+        count = len(ship.cargo)
+        ship.cargo = []
+        player.gold += total
+        player.total_gold_earned += total
+        self.save_ships()
+        return self._result(
+            result_cls,
+            f"{buyer['name']} takes all {count} {species_name} from the hold "
+            f"and pays {total} gold. You have {player.gold} gold.",
+            [Broadcast(room_id, f"{buyer['name']} buys a hold of {species_name}.")],
+        )
+
     def cargo_ship_for(self, player) -> Tuple[Optional[Ship], Optional[str]]:
         """
         The owner's ship whose hold is reachable from where they stand:
@@ -1790,10 +2054,10 @@ class GarageEngine:
         """
         aboard = self.ship_from_interior(player.current_room)
         if aboard is not None:
+            if self._is_public(aboard) or not aboard.is_skipjack():
+                return None, "Rental ships don't have a cargo hold."
             if aboard.owner.lower() != player.name.lower():
                 return None, "That's not your hold to rummage in."
-            if not aboard.is_skipjack():
-                return None, "This ship has no cargo hold."
             return aboard, None
         ship = self.owned_ship_for(player.name)
         if ship is None:
@@ -2055,5 +2319,7 @@ SKIPJACK (any pad off Alpha Prime):
   cargo / hold                  - What's stowed (owner only, fish by the pound)
   put <fish> cargo / take <fish> cargo / put all cargo / take all cargo
   modules / install <module> / uninstall <engine|hyper|cargo>
-  Dell at Beta Forge buys and sells upgrade modules (list / buy / sell).
+  Dell at the Forge buys and sells upgrade modules (list / buy / sell).
+  At Cinder Lot, Rigel Exchange, Deneb Yard, and Drift Station,
+  sell cargo dumps a hold that is entirely the species that buyer wants.
 """

@@ -1030,7 +1030,7 @@ BEER = Item(
 )
 
 # Ship upgrade modules. Stock parts are never items; only these upgrades
-# are bought, sold, installed, and pulled. Dell at Beta Forge deals in them.
+# are bought, sold, installed, and pulled. Dell at the Forge deals in them.
 MODULE_SLOTS = ("engine", "hyper", "cargo")
 MODULE_SLOT_LABELS = {
     "engine": "Engine (real speed)",
