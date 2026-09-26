@@ -21,6 +21,7 @@ class ItemType(Enum):
     BEER = "beer"
     GEM = "gem"
     SHARD = "shard"
+    MODULE = "module"
     MISC = "misc"
 
 
@@ -61,6 +62,8 @@ INVENTORY_TYPE_FILTERS = {
     "gems": ItemType.GEM,
     "shard": ItemType.SHARD,
     "shards": ItemType.SHARD,
+    "module": ItemType.MODULE,
+    "modules": ItemType.MODULE,
     "container": ItemType.CONTAINER,
     "containers": ItemType.CONTAINER,
     "box": ItemType.CONTAINER,
@@ -1026,8 +1029,89 @@ BEER = Item(
     condition=9,
 )
 
+# Ship upgrade modules. Stock parts are never items; only these upgrades
+# are bought, sold, installed, and pulled. Dell at Beta Forge deals in them.
+MODULE_SLOTS = ("engine", "hyper", "cargo")
+MODULE_SLOT_LABELS = {
+    "engine": "Engine (real speed)",
+    "hyper": "Hyperdrive (jump speed)",
+    "cargo": "Cargo hold (lbs of fish)",
+}
+# id -> (slot, stat, price)
+MODULE_SPECS = {
+    "engine_tuned": ("engine", 200, 2500),
+    "engine_racing": ("engine", 300, 8000),
+    "hyper_long": ("hyper", 200, 2500),
+    "hyper_deep": ("hyper", 300, 8000),
+    "cargo_freezer": ("cargo", 50, 2000),
+    "cargo_reefer": ("cargo", 100, 6000),
+}
+
+
+def _module(item_id: str, name: str, description: str) -> Item:
+    slot, stat, price = MODULE_SPECS[item_id]
+    return Item(
+        id=item_id,
+        name=name,
+        description=description,
+        item_type=ItemType.MODULE,
+        takeable=True,
+        value=price,
+        condition=9,
+    )
+
+
+MODULE_ITEMS = {
+    "engine_tuned": _module(
+        "engine_tuned", "tuned engine",
+        "A rebuilt sublight engine with the governor pulled. Realspace "
+        "speed 200.",
+    ),
+    "engine_racing": _module(
+        "engine_racing", "racing engine",
+        "A racing engine that still smells hot. Realspace speed 300.",
+    ),
+    "hyper_long": _module(
+        "hyper_long", "long-range hyperdrive",
+        "A hyperdrive core wound for distance. Jump speed 200.",
+    ),
+    "hyper_deep": _module(
+        "hyper_deep", "deep-space hyperdrive",
+        "A deep-space hyperdrive that hums when nobody is talking. Jump "
+        "speed 300.",
+    ),
+    "cargo_freezer": _module(
+        "cargo_freezer", "cargo freezer",
+        "An insulated cargo liner with a small chiller. Holds 50 lbs of fish.",
+    ),
+    "cargo_reefer": _module(
+        "cargo_reefer", "reefer cargo unit",
+        "A full refrigerated cargo unit on rails. Holds 100 lbs of fish.",
+    ),
+}
+
+
+def module_slot(item: Item) -> Optional[str]:
+    spec = MODULE_SPECS.get(item.id)
+    return spec[0] if spec else None
+
+
+def module_stat(item_id: str) -> int:
+    return MODULE_SPECS[item_id][1]
+
+
+def module_price(item_id: str) -> int:
+    return MODULE_SPECS[item_id][2]
+
+
+def create_module(item_id: str) -> Item:
+    return create_item_copy(MODULE_ITEMS[item_id], roll_stats=False, condition=9)
+
+
 # Items that shops will never buy or sell
-UNSELLABLE_TYPES = frozenset({ItemType.BEER, ItemType.GEM, ItemType.SHARD})
+UNSELLABLE_TYPES = frozenset({
+    ItemType.BEER, ItemType.GEM, ItemType.SHARD, ItemType.MODULE,
+})
 GEMMABLE_TYPES = frozenset({
     ItemType.FISHING_POLE,
     ItemType.LURE,

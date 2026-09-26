@@ -328,6 +328,8 @@ class GameCommands:
                 return boarded
         if command in ("take", "get", "pick") and self._args_name_truck(args):
             return self.cmd_take_from_truck(player, args)
+        if command in ("take", "get", "pick") and self._args_name_cargo(args):
+            return self.cmd_take_from_cargo(player, args)
         
         if command in self.commands:
             return self.commands[command](player, args)
@@ -635,6 +637,8 @@ class GameCommands:
 
         if self._args_name_truck(item_name):
             return self.cmd_take_from_truck(player, item_name)
+        if self._args_name_cargo(item_name):
+            return self.cmd_take_from_cargo(player, item_name)
 
         if item_name in ("all", "*"):
             return self._get_all_items(player, room)
@@ -727,29 +731,60 @@ class GameCommands:
             "truck", "trucks", "pickup", "your truck", "the truck", "my truck",
         }
 
-    def _args_name_truck(self, args: str) -> bool:
+    TRUCK_WORDS = frozenset({"truck", "trucks", "pickup"})
+    CARGO_WORDS = frozenset({"cargo", "hold", "cargohold"})
+    _CONTAINER_PREPOSITIONS = ("in", "into", "from", "to")
+
+    def _args_name_container(self, args: str, words: frozenset) -> bool:
         tokens = (args or "").strip().lower().split()
         if not tokens:
             return False
-        if tokens[-1] in ("truck", "trucks", "pickup"):
-            return True
-        if len(tokens) >= 2 and tokens[-2] in ("in", "into", "from", "to") and tokens[-1] in (
-            "truck", "trucks", "pickup",
-        ):
-            return True
-        return False
+        return tokens[-1] in words
 
-    def _item_query_from_truck_args(self, args: str) -> str:
+    def _item_query_from_container_args(self, args: str, words: frozenset) -> str:
         tokens = (args or "").strip().lower().split()
         if not tokens:
             return ""
-        if len(tokens) >= 2 and tokens[-2] in ("in", "into", "from", "to") and tokens[-1] in (
-            "truck", "trucks", "pickup",
-        ):
-            return " ".join(tokens[:-2]).strip()
-        if tokens[-1] in ("truck", "trucks", "pickup"):
-            return " ".join(tokens[:-1]).strip()
+        if tokens[-1] in words:
+            tokens = tokens[:-1]
+            if tokens and tokens[-1] in self._CONTAINER_PREPOSITIONS:
+                tokens = tokens[:-1]
+            if tokens and tokens[-1] == "the":
+                tokens = tokens[:-1]
         return " ".join(tokens).strip()
+
+    def _args_name_truck(self, args: str) -> bool:
+        return self._args_name_container(args, self.TRUCK_WORDS)
+
+    def _item_query_from_truck_args(self, args: str) -> str:
+        return self._item_query_from_container_args(args, self.TRUCK_WORDS)
+
+    def _args_name_cargo(self, args: str) -> bool:
+        return bool(self.garage) and self._args_name_container(args, self.CARGO_WORDS)
+
+    def _item_query_from_cargo_args(self, args: str) -> str:
+        return self._item_query_from_container_args(args, self.CARGO_WORDS)
+
+    def cmd_put_cargo(self, player: Player, args: str) -> CommandResult:
+        """Stow fish in the owner's Skipjack hold: put <fish> cargo."""
+        query = self._item_query_from_cargo_args(args)
+        if not query:
+            return CommandResult("Put what in the hold?")
+        if query in ("all", "*"):
+            return self.garage.cargo_put_all(player, CommandResult)
+        item = player.find_item(query)
+        if not item:
+            return CommandResult(f"You're not carrying a '{query}'.")
+        return self.garage.cargo_put(player, item, CommandResult)
+
+    def cmd_take_from_cargo(self, player: Player, args: str) -> CommandResult:
+        """Take fish out of the owner's Skipjack hold: take <fish> cargo."""
+        query = self._item_query_from_cargo_args(args)
+        if not query:
+            return CommandResult("Take what from the hold?")
+        if query in ("all", "*"):
+            return self.garage.cargo_take_all(player, CommandResult)
+        return self.garage.cargo_take(player, query, CommandResult)
 
     def _maybe_refuse_truck_board(self, player: Player, args: str) -> Optional[CommandResult]:
         if player.current_room != TRUCK_ROOM_ID:
@@ -881,6 +916,8 @@ class GameCommands:
         """Store an item in the truck: put <item> truck / put all truck."""
         if not args.strip():
             return CommandResult("Put what where?")
+        if self._args_name_cargo(args):
+            return self.cmd_put_cargo(player, args)
         if not self._args_name_truck(args) and not self._is_truck_name(args):
             return CommandResult("Put it where? Try: put <item> truck")
         if player.current_room != TRUCK_ROOM_ID:
@@ -3309,6 +3346,8 @@ TIPS:
         store_type = self._get_current_store(room.id)
         
         if not store_type:
+            if self.garage and self.garage.is_dealer_pad(room.id):
+                return self.garage.pad_buy(player, room.id, item_name, CommandResult)
             return CommandResult("You need to be in a store to buy items!")
         
         if not item_name:
@@ -3485,6 +3524,8 @@ TIPS:
         store_type = self._get_current_store(room.id)
         
         if not store_type:
+            if self.garage and self.garage.is_dealer_pad(room.id):
+                return CommandResult(self.garage.pad_listing(player, room.id))
             return CommandResult("You need to be in a store to see what's for sale!")
 
         wisdom = player.get_effective_attribute("wisdom")
@@ -3529,6 +3570,8 @@ TIPS:
         store_type = self._get_current_store(room.id)
         
         if not store_type:
+            if self.garage and self.garage.is_dealer_pad(room.id):
+                return self.garage.pad_sell(player, room.id, item_name, CommandResult)
             return CommandResult("You need to be in a store to sell items!")
         
         if not item_name:
