@@ -3240,7 +3240,6 @@ ITEMS:
   remove <attr>         - Remove all gear boosting that attribute (e.g. rem con)
   repair/fix [item]     - List worn gear, or repair with a toolkit
   repair/fix next       - Repair the next item that isn't new
-                          (in jail you can mend by hand, 3× slower)
   stats/attributes      - Show character attributes and level
 
 FISHING:

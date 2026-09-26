@@ -466,7 +466,9 @@ wait for your name and type 'roll'.""",
         description="""You're in a small, damp jail cell. Iron bars form the door, and a 
 hard wooden bench is bolted to the floor. Someone scratched "NO 
 HACKING PLEASE" into the wall. A single bulb flickers above you.
-The smell of old fish bait somehow still finds its way in here.""",
+The smell of old fish bait somehow still finds its way in here.
+
+Maybe you can spend the time repairing something during your stay here.""",
         exits={"out": "store"},
         items=[],
         is_water=False,
