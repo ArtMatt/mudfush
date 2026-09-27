@@ -272,6 +272,25 @@ def _has_key(player) -> bool:
     return any(item.id == CAMPER_KEY_ID for item in getattr(player, "inventory", []))
 
 
+_SHIP_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9' -]*[A-Za-z0-9])?")
+
+
+def _clean_ship_name(raw: str) -> Optional[str]:
+    """A short display name, or None if it isn't one."""
+    text = " ".join(raw.split())
+    if not text or len(text) > 32 or not _SHIP_NAME_RE.fullmatch(text):
+        return None
+    return text
+
+
+def _ship_names_clash(a: str, b: str) -> bool:
+    """True when the two names would answer the same ship command."""
+    left, right = a.lower(), b.lower()
+    if left == right or left.startswith(right) or right.startswith(left):
+        return True
+    return left in right.split() or right in left.split()
+
+
 def _owner_token(name: str) -> str:
     token = re.sub(r"[^a-zA-Z0-9]+", "_", (name or "").strip()).strip("_").lower()
     return token or "owner"
@@ -728,7 +747,9 @@ class GarageEngine:
     def can_create_owned_ship_at(self, room_id: str) -> bool:
         return room_id in REMOTE_PAD_IDS
 
-    def create_owned_ship(self, player, pad_room_id: str) -> Optional[Ship]:
+    def create_owned_ship(
+        self, player, pad_room_id: str, name: Optional[str] = None
+    ) -> Optional[Ship]:
         """One personal Skipjack per player, only at pads off Alpha Prime."""
         if self.owned_ship_for(player.name):
             return None
@@ -736,7 +757,7 @@ class GarageEngine:
             return None
         token = _owner_token(player.name)
         ship = Ship(
-            name=f"{player.name}'s Skipjack",
+            name=name or f"{player.name}'s Skipjack",
             owner=player.name,
             ship_id=f"ship_{token}",
             cockpit_room=f"skipjack_cockpit_{token}",
@@ -1265,6 +1286,7 @@ class GarageEngine:
             "fire": self.cmd_fire,
             "recharge": self.cmd_recharge,
             "autopilot": self.cmd_autopilot,
+            "rename": self.cmd_rename,
             "cargo": self.cmd_cargo,
             "hold": self.cmd_cargo,
             "install": self.cmd_install,
@@ -1819,6 +1841,65 @@ class GarageEngine:
         state = "engaged" if ship.autopilot else "disengaged"
         return self._result(result_cls, f"Autopilot {state}.")
 
+    def _refresh_interior_names(self, ship: Ship) -> None:
+        cockpit = self.rooms.get(ship.cockpit_room)
+        if cockpit is not None:
+            cockpit.name = f"Inside {ship.name}"
+        hold = self.rooms.get(ship.hold_room) if ship.hold_room else None
+        if hold is not None:
+            hold.name = f"Cargo Hold of {ship.name}"
+
+    def _ship_name_taken(self, ship: Ship, new_name: str) -> bool:
+        return any(
+            other is not ship and _ship_names_clash(other.name, new_name)
+            for other in self.ships
+        )
+
+    def cmd_rename(self, player, args, result_cls):
+        """Rename the owner's ship while standing on the pad it is parked at."""
+        room_id = player.current_room
+        on_pad = room_id == GARAGE_ROOM_ID or room_id in REMOTE_PAD_IDS
+        if not on_pad:
+            return self._result(
+                result_cls,
+                "You can rename your ship from the pad where it's parked.",
+            )
+        owned = self.owned_ship_for(player.name)
+        if owned is None:
+            return self._result(result_cls, "You don't have a ship to rename.")
+        if owned.location != room_id or owned.state != ShipState.DOCKED:
+            return self._result(
+                result_cls, "Your ship isn't parked on this pad."
+            )
+        text = " ".join(args.split())
+        if text.lower().startswith("ship "):
+            text = text.split(maxsplit=1)[1]
+        new_name = _clean_ship_name(text)
+        if new_name is None:
+            return self._result(
+                result_cls,
+                "Rename it to what? Letters, numbers, spaces, apostrophes, "
+                "or hyphens, up to 32 characters.",
+            )
+        if new_name.lower() == owned.name.lower():
+            return self._result(
+                result_cls, f"It's already called {owned.name}."
+            )
+        if self._ship_name_taken(owned, new_name):
+            return self._result(
+                result_cls,
+                "Another ship already goes by something too close to that.",
+            )
+        old_name = owned.name
+        owned.name = new_name
+        self._refresh_interior_names(owned)
+        self.save_ships()
+        return self._result(
+            result_cls,
+            f"You rename {old_name} to {new_name}.",
+            [Broadcast(room_id, f"{player.name} renames {old_name} to {new_name}.")],
+        )
+
     # -- pad dealer: Skipjack hulls, and Dell's modules at Beta Forge ---------
 
     def is_dealer_pad(self, room_id: str) -> bool:
@@ -1856,7 +1937,7 @@ class GarageEngine:
             f"hyperdrive {SKIPJACK_STOCK['hyper']}, hold {SKIPJACK_STOCK['cargo']} lbs."
         )
         if owned is None:
-            lines.append("  Type 'buy ship' to take one home.")
+            lines.append("  Type 'buy ship' to take one home. You'll name it on the spot.")
         else:
             here = owned.location == room_id and owned.state == ShipState.DOCKED
             lines.append(
@@ -1865,6 +1946,7 @@ class GarageEngine:
             )
             if here:
                 lines.append("  Type 'sell ship' with an empty hold and nobody aboard.")
+                lines.append("  Type 'rename <name>' to give it a new name.")
             else:
                 lines.append("  It has to be parked on this pad to sell it.")
         if room_id == DELL_PAD_ID:
@@ -1916,16 +1998,14 @@ class GarageEngine:
                     result_cls,
                     f"A Skipjack runs {SKIPJACK_BASE_PRICE} gold. You're short.",
                 )
-            ship = self.create_owned_ship(player, room_id)
-            if ship is None:
+            if not self.can_create_owned_ship_at(room_id):
                 return self._result(result_cls, "Nobody sells hulls here.")
-            player.gold -= SKIPJACK_BASE_PRICE
+            player.ship_naming_pad = room_id
             return self._result(
                 result_cls,
-                f"You sign for a Skipjack. {ship.name} is rolled onto the pad, "
-                f"padlocked, keys in your hand.\nYou have {player.gold} gold left.\n"
-                "UNLOCK it, OPEN it, and BOARD.",
-                [Broadcast(room_id, f"{player.name} takes delivery of {ship.name}.")],
+                f"A Skipjack runs {SKIPJACK_BASE_PRICE} gold. The dealer slides "
+                "the paperwork over and taps the blank line.\n"
+                "What do you want to call it? Type the name, or 'cancel'.",
             )
         if room_id != DELL_PAD_ID:
             return self._result(
@@ -1948,6 +2028,62 @@ class GarageEngine:
             result_cls,
             f"Dell slides you a {match.name} for {match.value} gold. "
             f"\"Install it yourself, in the hold.\" You have {player.gold} gold left.",
+        )
+
+    def awaiting_ship_name(self, player) -> bool:
+        """True while a hull purchase is waiting for the player to name it."""
+        pad = getattr(player, "ship_naming_pad", None)
+        if not pad:
+            return False
+        if player.current_room != pad:
+            player.ship_naming_pad = None
+            return False
+        return True
+
+    def name_new_ship(self, player, raw_name: str, result_cls):
+        """Finish a pending hull purchase with the name the player typed."""
+        room_id = player.ship_naming_pad
+        text = " ".join((raw_name or "").split())
+        if text.lower() in {"cancel", "never mind", "nevermind", "no"}:
+            player.ship_naming_pad = None
+            return self._result(
+                result_cls, "You slide the paperwork back. No sale."
+            )
+        new_name = _clean_ship_name(text)
+        if new_name is None:
+            return self._result(
+                result_cls,
+                "That won't fit on the registry. Letters, numbers, spaces, "
+                "apostrophes, or hyphens, up to 32 characters. Or 'cancel'.",
+            )
+        if any(_ship_names_clash(other.name, new_name) for other in self.ships):
+            return self._result(
+                result_cls,
+                "Another ship already goes by something too close to that. "
+                "Try another name, or 'cancel'.",
+            )
+        if self.owned_ship_for(player.name):
+            player.ship_naming_pad = None
+            return self._result(
+                result_cls, "You already own a ship. Sell it first."
+            )
+        if player.gold < SKIPJACK_BASE_PRICE:
+            player.ship_naming_pad = None
+            return self._result(
+                result_cls,
+                f"A Skipjack runs {SKIPJACK_BASE_PRICE} gold. You're short.",
+            )
+        ship = self.create_owned_ship(player, room_id, name=new_name)
+        player.ship_naming_pad = None
+        if ship is None:
+            return self._result(result_cls, "Nobody sells hulls here.")
+        player.gold -= SKIPJACK_BASE_PRICE
+        return self._result(
+            result_cls,
+            f"You sign for a Skipjack. {ship.name} is rolled onto the pad, "
+            f"padlocked, keys in your hand.\nYou have {player.gold} gold left.\n"
+            "UNLOCK it, OPEN it, and BOARD.",
+            [Broadcast(room_id, f"{player.name} takes delivery of {ship.name}.")],
         )
 
     def pad_sell(self, player, room_id: str, query: str, result_cls):
@@ -2321,6 +2457,8 @@ BACK GARAGE (south of Slick's Surplus):
 
 SKIPJACK (any pad off Alpha Prime):
   list / buy ship / sell ship   - 10000g hull, one per pilot, sells hull + modules
+                                  (buy ship asks you to name it first)
+  rename <name>                - Rename it while it is parked on this pad
   cargo / hold                  - What's stowed (owner only, fish by the pound)
   put <fish> cargo / take <fish> cargo / put all cargo / take all cargo
   modules / install <module> / uninstall <engine|hyper|cargo>

@@ -327,6 +327,10 @@ class GameCommands:
             if attribute:
                 return self._choose_beer_attribute(player, attribute)
 
+        # A hull purchase waiting on its name takes the next line whole
+        if self.garage and self.garage.awaiting_ship_name(player):
+            return self.garage.name_new_ship(player, input_text, CommandResult)
+
         if command in ("board", "enter", "boa", "ent"):
             boarded = self._maybe_refuse_truck_board(player, args)
             if boarded is not None:
@@ -344,7 +348,11 @@ class GameCommands:
             return self.cmd_go(player, DIRECTION_ALIASES[command])
 
         if self.garage:
-            handled = self.garage.handle(player, command, args, CommandResult)
+            garage_args = args
+            if command in ("rename", "ren"):
+                original_parts = input_text.split(maxsplit=1)
+                garage_args = original_parts[1] if len(original_parts) > 1 else ""
+            handled = self.garage.handle(player, command, garage_args, CommandResult)
             if handled is not None:
                 self._end_fish_share_if_left(player)
                 return handled

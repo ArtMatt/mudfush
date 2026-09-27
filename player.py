@@ -108,6 +108,8 @@ class Player:
     slick_deal_pending: bool = False
     # Runtime-only: Curt can bar an idle spectator for the current Slick visit
     ceelo_kicked_visit_id: int = -1
+    # Runtime-only: pad where a Skipjack purchase is waiting on a name (not saved)
+    ship_naming_pad: Optional[str] = None
     # Runtime-only beer drink confirmation (not saved)
     beer_awaiting_attr: bool = False
     beer_confirm_attr: Optional[str] = None
