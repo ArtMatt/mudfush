@@ -24,6 +24,7 @@ from items import (
     specialty_lure_essence_from_fish, is_ancient_fish_id,
     colorize_fish_species, colorize_ancient_fish,
     normalize_container_shards, CAMPER_KEY,
+    items_matching,
 )
 from market import (
     BubbaFishQuest,
@@ -658,6 +659,9 @@ class GameCommands:
 
         if item_name in ("all", "*"):
             return self._get_all_items(player, room)
+        selector = self._all_selector(item_name)
+        if selector:
+            return self._get_all_items(player, room, selector)
         
         # Find item in room
         for item in room.items:
@@ -674,14 +678,18 @@ class GameCommands:
         
         return CommandResult(f"You don't see a '{item_name}' here.")
 
-    def _get_all_items(self, player: Player, room) -> CommandResult:
-        """Pick up every takeable item on the ground."""
+    def _get_all_items(self, player: Player, room, query: str = "") -> CommandResult:
+        """Pick up every takeable item on the ground, or only those matching query."""
         if not room.items:
             return CommandResult("There's nothing here to pick up.")
 
+        pool = items_matching(room.items, query) if query else list(room.items)
+        if query and not pool:
+            return CommandResult(f"You don't see any '{query}' here.")
+
         taken = []
         left = []
-        for item in list(room.items):
+        for item in pool:
             if not item.takeable:
                 left.append(item)
                 continue
@@ -692,7 +700,8 @@ class GameCommands:
         if not taken:
             return CommandResult("You can't take anything here.")
 
-        lines = ["You pick up everything you can:"]
+        label = f"the {query}" if query else "everything you can"
+        lines = [f"You pick up {label}:"]
         for item in taken:
             lines.append(f"  - {item.display_name}")
         if left:
@@ -711,9 +720,15 @@ class GameCommands:
         return CommandResult(message="\n".join(lines), broadcast=broadcast)
     
     def cmd_drop(self, player: Player, item_name: str) -> CommandResult:
-        """Drop an item from inventory."""
+        """Drop an item from inventory, or every match with 'drop all <name>'."""
         if not item_name:
             return CommandResult("Drop what?")
+
+        selector = self._all_selector(item_name)
+        if selector is not None:
+            if not selector:
+                return CommandResult("Drop all of what?")
+            return self._drop_all(player, selector)
         
         item = player.find_item(item_name)
         if not item:
@@ -740,6 +755,60 @@ class GameCommands:
             message=f"You drop the {item.display_name}.",
             broadcast=f"ROOM:{room.id}:{player.name} drops {item.display_name}."
         )
+
+    def _drop_all(self, player: Player, query: str) -> CommandResult:
+        """Drop every carried item matching the name. Worn gear stays on."""
+        room = self.rooms.get(player.current_room)
+        matches = items_matching(player.inventory, query)
+        if not matches:
+            return CommandResult(f"You're not carrying any '{query}'.")
+        dropping = []
+        equipped = []
+        for item in matches:
+            if player.is_wearing_or_equipped(item):
+                equipped.append(item)
+            else:
+                dropping.append(item)
+        if not dropping:
+            return CommandResult("You should unequip that before dropping it.")
+
+        dropped = []
+        released = []
+        for item in dropping:
+            player.remove_item(item)
+            if is_ancient_fish_id(item.id):
+                if self.lake_state:
+                    self.lake_state.release(item.id)
+                released.append(item)
+            else:
+                room.items.append(item)
+                dropped.append(item)
+
+        lines = [f"You drop the {query}:"]
+        lines.extend(f"  - {item.display_name}" for item in dropped)
+        if released:
+            lines.append("Back to the water:")
+            lines.extend(f"  - {item.display_name}" for item in released)
+        if equipped:
+            lines.append("Left equipped:")
+            lines.extend(f"  - {item.display_name}" for item in equipped)
+        if len(dropped) == 1:
+            broadcast = f"ROOM:{room.id}:{player.name} drops {dropped[0].display_name}."
+        elif dropped:
+            broadcast = f"ROOM:{room.id}:{player.name} drops {len(dropped)} items."
+        else:
+            broadcast = None
+        return CommandResult(message="\n".join(lines), broadcast=broadcast)
+
+    def _all_selector(self, query: str) -> Optional[str]:
+        """None unless the query starts with all. '' means everything."""
+        tokens = (query or "").strip().lower().split()
+        if not tokens or tokens[0] not in ("all", "*"):
+            return None
+        rest = tokens[1:]
+        if rest and rest[0] == "the":
+            rest = rest[1:]
+        return " ".join(rest)
 
     def _is_truck_name(self, text: str) -> bool:
         cleaned = (text or "").strip().lower()
@@ -786,8 +855,9 @@ class GameCommands:
         query = self._item_query_from_cargo_args(args)
         if not query:
             return CommandResult("Put what in the hold?")
-        if query in ("all", "*"):
-            return self.garage.cargo_put_all(player, CommandResult)
+        selector = self._all_selector(query)
+        if selector is not None:
+            return self.garage.cargo_put_all(player, CommandResult, selector)
         item = player.find_item(query)
         if not item:
             return CommandResult(f"You're not carrying a '{query}'.")
@@ -798,8 +868,9 @@ class GameCommands:
         query = self._item_query_from_cargo_args(args)
         if not query:
             return CommandResult("Take what from the hold?")
-        if query in ("all", "*"):
-            return self.garage.cargo_take_all(player, CommandResult)
+        selector = self._all_selector(query)
+        if selector is not None:
+            return self.garage.cargo_take_all(player, CommandResult, selector)
         return self.garage.cargo_take(player, query, CommandResult)
 
     def _maybe_refuse_truck_board(self, player: Player, args: str) -> Optional[CommandResult]:
@@ -852,9 +923,15 @@ class GameCommands:
                 storable.append(item)
         return storable, equipped, ancients
 
-    def _put_all_in_truck(self, player: Player) -> CommandResult:
+    def _put_all_in_truck(self, player: Player, query: str = "") -> CommandResult:
         """Store every eligible inventory item that fits after shard merge."""
         candidates, equipped, ancients = self._truck_put_candidates(player)
+        if query:
+            candidates = items_matching(candidates, query)
+            equipped = items_matching(equipped, query)
+            ancients = items_matching(ancients, query)
+            if not candidates and not equipped and not ancients:
+                return CommandResult(f"You're not carrying any '{query}'.")
         if not candidates and not equipped and not ancients:
             return CommandResult("You're not carrying anything to store.")
         if not candidates:
@@ -888,7 +965,8 @@ class GameCommands:
         player.truck_storage = truck
         note = self._shard_combine_note(before + moving, truck)
 
-        lines = ["You put everything you can in your truck:"]
+        kind = f"the {query}" if query else "everything you can"
+        lines = [f"You put {kind} in your truck:"]
         for item in stored:
             lines.append(f"  - {item.display_name}")
         if leftover:
@@ -911,17 +989,25 @@ class GameCommands:
         lines.append(player.get_truck_display())
         return CommandResult("\n".join(lines))
 
-    def _take_all_from_truck(self, player: Player) -> CommandResult:
-        """Move every stored truck item into inventory."""
+    def _take_all_from_truck(self, player: Player, query: str = "") -> CommandResult:
+        """Move stored truck items into inventory, optionally only those matching query."""
         if not player.truck_storage:
             return CommandResult("Your truck is empty.")
-        taken = list(player.truck_storage)
+        if query:
+            taken = items_matching(player.truck_storage, query)
+            if not taken:
+                return CommandResult(f"There's no '{query}' in your truck.")
+            for item in taken:
+                player.truck_storage.remove(item)
+        else:
+            taken = list(player.truck_storage)
+            player.truck_storage = []
         before = list(player.inventory)
-        player.truck_storage = []
         player.inventory.extend(taken)
         player.inventory = normalize_container_shards(player.inventory)
         note = self._shard_combine_note(before + taken, player.inventory)
-        lines = ["You take everything from your truck:"]
+        label = f"the {query}" if query else "everything"
+        lines = [f"You take {label} from your truck:"]
         for item in taken:
             lines.append(f"  - {item.display_name}")
         if note:
@@ -941,8 +1027,9 @@ class GameCommands:
         query = self._item_query_from_truck_args(args)
         if not query:
             return CommandResult("Put what in the truck?")
-        if query in ("all", "*"):
-            return self._put_all_in_truck(player)
+        selector = self._all_selector(query)
+        if selector is not None:
+            return self._put_all_in_truck(player, selector)
         item = player.find_item(query)
         if not item:
             return CommandResult(f"You're not carrying a '{query}'.")
@@ -973,8 +1060,9 @@ class GameCommands:
         query = self._item_query_from_truck_args(args)
         if not query:
             return CommandResult("Take what from the truck?")
-        if query in ("all", "*"):
-            return self._take_all_from_truck(player)
+        selector = self._all_selector(query)
+        if selector is not None:
+            return self._take_all_from_truck(player, selector)
         item = player.find_truck_item(query)
         if not item:
             return CommandResult(f"There's no '{query}' in your truck.")
@@ -3311,11 +3399,15 @@ ITEMS:
   look/l/ls/cd        - Look at your surroundings
   get/take/pick <item>  - Pick up an item
   get all               - Pick up everything on the ground
+  get all <item>        - Pick up every matching item
   drop <item>          - Drop an item
+  drop all <item>      - Drop every matching item you are carrying
   put <item/#> truck   - Store an item in your truck (parking lot)
   put all truck        - Store everything you can in your truck
+  put all <item> truck - Store every matching item in your truck
   take <item/#> truck  - Take an item from your truck
   take all truck       - Take everything from your truck
+  take all <item> truck - Take every matching item from your truck
   truck                - Look in your truck
   use <item>           - Use a consumable item
   use/feed <jig> <fish>  - Hand Cliff a fish to dress or improve a jig

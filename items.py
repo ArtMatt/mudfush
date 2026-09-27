@@ -652,6 +652,17 @@ class Item:
         return None
 
 
+def items_matching(items, query: str):
+    """Items whose name matches query. A trailing s is optional."""
+    text = (query or "").strip().lower()
+    if not text:
+        return list(items)
+    hits = [item for item in items if item.matches(text)]
+    if hits or len(text) < 4 or not text.endswith("s"):
+        return hits
+    return [item for item in items if item.matches(text[:-1])]
+
+
 # Fishing Poles
 BASIC_POLE = Item(
     id="basic_pole",

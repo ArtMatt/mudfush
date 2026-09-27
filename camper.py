@@ -702,6 +702,43 @@ def default_starsystems() -> List[StarSystem]:
     return [sol, betelgeuse, vega, sirius, rigel, deneb, void]
 
 
+STAR_MAP_COLUMNS = 48
+STAR_MAP_ROWS = 17
+
+
+def render_star_map(systems: List[StarSystem], here: Optional[StarSystem]) -> str:
+    """Plain-text star map. O is a system, + is the one you're in."""
+    if not systems:
+        return "The chart is blank."
+    xs = [s.galaxy_x for s in systems]
+    ys = [s.galaxy_y for s in systems]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 1)
+    span_y = max(max_y - min_y, 1)
+    longest = max(len(s.name) for s in systems)
+    width = STAR_MAP_COLUMNS + longest + 2
+    grid = [[" "] * width for _ in range(STAR_MAP_ROWS)]
+
+    def place(row: int, col: int, text: str) -> None:
+        for offset, ch in enumerate(text):
+            if 0 <= col + offset < width:
+                grid[row][col + offset] = ch
+
+    for system in systems:
+        col = round((system.galaxy_x - min_x) / span_x * (STAR_MAP_COLUMNS - 1))
+        row = round((max_y - system.galaxy_y) / span_y * (STAR_MAP_ROWS - 1))
+        marker = "+" if system is here else "O"
+        place(row, col, f"{marker} {system.name}")
+
+    lines = ["".join(cells).rstrip() for cells in grid]
+    if here is not None:
+        footer = f"O star system   + you are here ({here.name})"
+    else:
+        footer = "O star system   + you are here (in hyperspace, nowhere yet)"
+    return "\n".join(["STAR MAP", *lines, footer])
+
+
 def default_ships(systems: List[StarSystem]) -> List[Ship]:
     ship = Ship(
         name="Silver Airstream",
@@ -1286,6 +1323,7 @@ class GarageEngine:
             "fire": self.cmd_fire,
             "recharge": self.cmd_recharge,
             "autopilot": self.cmd_autopilot,
+            "map": self.cmd_map,
             "rename": self.cmd_rename,
             "cargo": self.cmd_cargo,
             "hold": self.cmd_cargo,
@@ -1711,6 +1749,21 @@ class GarageEngine:
             f"Hyperspace course plotted to {dest.name} "
             f"({jx:.0f} {jy:.0f} {jz:.0f}), distance {ship.hyperdistance}.",
         )
+
+    def _player_system(self, player) -> Optional[StarSystem]:
+        """The star system the player is standing in, or None in hyperspace."""
+        ship = self.ship_from_interior(player.current_room)
+        if ship is not None:
+            if ship.starsystem is not None:
+                return ship.starsystem
+            if ship.state == ShipState.HYPERSPACE:
+                return None
+            return self.system_for_pad(ship.location or ship.lastdoc)
+        return self.system_for_pad(player.current_room)
+
+    def cmd_map(self, player, args, result_cls):
+        here = self._player_system(player)
+        return self._result(result_cls, render_star_map(self.systems, here))
 
     def cmd_hyperspace(self, player, args, result_cls):
         ship, err = self._need_ship(player, result_cls)
@@ -2274,18 +2327,27 @@ class GarageEngine:
             f"You stow the {item.display_name} in the hold.\n{self.cargo_display(ship)}",
         )
 
-    def cargo_put_all(self, player, result_cls):
-        from items import ItemType
+    def cargo_put_all(self, player, result_cls, query: str = ""):
+        from items import ItemType, items_matching
 
         ship, err = self.cargo_ship_for(player)
         if err:
             return self._result(result_cls, err)
+        pool = list(player.inventory)
+        if query:
+            pool = items_matching(pool, query)
+            if not pool:
+                return self._result(
+                    result_cls, f"You're not carrying any '{query}'."
+                )
         fish = [
-            item for item in list(player.inventory)
+            item for item in pool
             if item.item_type == ItemType.FISH
             and not player.is_wearing_or_equipped(item)
         ]
         if not fish:
+            if query:
+                return self._result(result_cls, "Only fish go in the hold.")
             return self._result(result_cls, "You're not carrying any fish to stow.")
         stowed, left, refused = [], [], []
         load = ship.cargo_weight()
@@ -2311,7 +2373,8 @@ class GarageEngine:
             player.remove_item(item)
             ship.cargo.append(item)
         self.save_ships()
-        lines = ["You stow what fits in the hold:"]
+        label = f"the {query}" if query else "what fits"
+        lines = [f"You stow {label} in the hold:"]
         lines.extend(f"  - {item.display_name}" for item in stowed)
         if left:
             lines.append("Too heavy for what's left:")
@@ -2334,17 +2397,29 @@ class GarageEngine:
         self.save_ships()
         return self._result(result_cls, f"You take the {item.display_name} from the hold.")
 
-    def cargo_take_all(self, player, result_cls):
+    def cargo_take_all(self, player, result_cls, query: str = ""):
+        from items import items_matching
+
         ship, err = self.cargo_ship_for(player)
         if err:
             return self._result(result_cls, err)
         if not ship.cargo:
             return self._result(result_cls, "The hold is empty.")
-        taken = list(ship.cargo)
-        ship.cargo = []
+        if query:
+            taken = items_matching(ship.cargo, query)
+            if not taken:
+                return self._result(
+                    result_cls, f"There's no '{query}' in the hold."
+                )
+            for item in taken:
+                ship.cargo.remove(item)
+        else:
+            taken = list(ship.cargo)
+            ship.cargo = []
         player.inventory.extend(taken)
         self.save_ships()
-        lines = ["You clear out the hold:"]
+        label = f"the {query}" if query else "the hold"
+        lines = [f"You take {label} out:" if query else "You clear out the hold:"]
         lines.extend(f"  - {item.display_name}" for item in taken)
         return self._result(result_cls, "\n".join(lines))
 
@@ -2452,6 +2527,7 @@ BACK GARAGE (south of Slick's Surplus):
   status / radar        - Instruments
   trajectory <x> <y> <z> / accelerate <speed> (acc)
   calculate (cal) [system x y z] / hyperspace (hyper)
+  map                   - Star map; + marks the system you're in
   land                  - List stops; land <name> within 200 units
   target / fire lasers  - Combat
   recharge / autopilot  - Shields and auto
@@ -2462,7 +2538,7 @@ SKIPJACK (any pad off Earth):
                                   (buy ship asks you to name it first)
   rename <name>                - Rename it while it is parked on this pad
   cargo / hold                  - What's stowed (owner only, fish by the pound)
-  put <fish> cargo / take <fish> cargo / put all cargo / take all cargo
+  put <fish> cargo / take <fish> cargo / put all [fish] cargo / take all [fish] cargo
   modules / install <module> / uninstall <engine|hyper|cargo>
   Dell at the Forge buys and sells upgrade modules (list / buy / sell).
   At Cinder Lot, Rigel Exchange, Deneb Yard, and Drift Station,
