@@ -1043,8 +1043,8 @@ MODULE_SPECS = {
     "engine_racing": ("engine", 300, 8000),
     "hyper_long": ("hyper", 200, 2500),
     "hyper_deep": ("hyper", 300, 8000),
-    "cargo_freezer": ("cargo", 50, 2000),
-    "cargo_reefer": ("cargo", 100, 6000),
+    "cargo_freezer": ("cargo", 100, 2000),
+    "cargo_reefer": ("cargo", 200, 6000),
 }
 
 
@@ -1082,11 +1082,11 @@ MODULE_ITEMS = {
     ),
     "cargo_freezer": _module(
         "cargo_freezer", "cargo freezer",
-        "An insulated cargo liner with a small chiller. Holds 50 lbs of fish.",
+        "An insulated cargo liner with a small chiller. Holds 100 lbs of fish.",
     ),
     "cargo_reefer": _module(
         "cargo_reefer", "reefer cargo unit",
-        "A full refrigerated cargo unit on rails. Holds 100 lbs of fish.",
+        "A full refrigerated cargo unit on rails. Holds 200 lbs of fish.",
     ),
 }
 

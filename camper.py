@@ -65,11 +65,11 @@ PUBLIC_OWNER = "Public"
 SHIPS_PATH = Path("saves/.ships.json")
 
 # Hulls. The Airstream is the garage rental; the Skipjack is the two-room
-# ship players buy and sell at any pad off Alpha Prime.
+# ship players buy and sell at any pad off Earth.
 HULL_AIRSTREAM = "airstream"
 HULL_SKIPJACK = "skipjack"
 SKIPJACK_BASE_PRICE = 10000
-SKIPJACK_STOCK = {"engine": 100, "hyper": 100, "cargo": 25}
+SKIPJACK_STOCK = {"engine": 100, "hyper": 100, "cargo": 50}
 DELL_PAD_ID = "beta_forge"       # Dell buys and sells upgrade modules here
 MODULE_BUYBACK = 0.5             # Dell pays half for a loose module
 CARGO_WORDS = frozenset({"cargo", "hold", "cargohold"})
@@ -402,7 +402,7 @@ REMOTE_PADS = (
             "species": ("bluegill", "walleye", "pike"),
             "blurb": (
                 "Mara buys fish out of cargo holds and nothing else. She "
-                "posts one species at a time and will not take a mixed load."
+                "posts one species at a time and leaves the rest of the hold alone."
             ),
         },
     },
@@ -426,7 +426,7 @@ REMOTE_PADS = (
             "species": ("pebble_perch", "trout", "moon_darter"),
             "blurb": (
                 "Holt calls prices through a grate. He buys one species from "
-                "a cargo hold, and he wants the whole hold to match."
+                "a cargo hold. He takes his species and leaves the rest."
             ),
         },
     },
@@ -450,7 +450,7 @@ REMOTE_PADS = (
             "species": ("bass", "catfish", "sting_puffer"),
             "blurb": (
                 "Bornkt keeps a chalkboard of the one species she is buying. "
-                "A mixed hold is a wasted trip."
+                "She takes those and ignores the rest of the hold."
             ),
         },
     },
@@ -466,7 +466,7 @@ REMOTE_PADS = (
             "species": ("mud_carp", "zen_guppy", "legendary_carp"),
             "blurb": (
                 "Nix buys odd fish out of cargo holds, one species at a time. "
-                "She will not pick through a mixed load."
+                "She takes her species and leaves everything else in the hold."
             ),
         },
     },
@@ -622,7 +622,7 @@ def default_starsystems() -> List[StarSystem]:
         name="Sol", galaxy_x=0, galaxy_y=0,
         stars=[Star("Sol", -7000, 0, 0)],
         planets=[
-            Planet("Alpha Prime", 1000, 1000, 1000, [
+            Planet("Earth", 1000, 1000, 1000, [
                 LandingPad("Back Garage", GARAGE_ROOM_ID, 1000, 1000, 1000),
             ]),
             Planet("Europa", -1800, 900, 2200, [
@@ -750,7 +750,7 @@ class GarageEngine:
     def create_owned_ship(
         self, player, pad_room_id: str, name: Optional[str] = None
     ) -> Optional[Ship]:
-        """One personal Skipjack per player, only at pads off Alpha Prime."""
+        """One personal Skipjack per player, only at pads off Earth."""
         if self.owned_ship_for(player.name):
             return None
         if not self.can_create_owned_ship_at(pad_room_id):
@@ -1968,9 +1968,8 @@ class GarageEngine:
                 f"for the next {_format_remaining(cycle_remaining())}."
             )
             lines.append(
-                f"  The whole hold has to be {species_name}. "
-                f"Pays {CARGO_BUY_MULTIPLIER}× listed value. "
-                "A mixed load is refused. Type 'sell cargo'."
+                f"  They buy every {species_name} in the hold and leave the rest. "
+                f"Pays {CARGO_BUY_MULTIPLIER}× listed value. Type 'sell cargo'."
             )
         lines.append("")
         lines.append(f"Your gold: {player.gold}")
@@ -2141,7 +2140,7 @@ class GarageEngine:
     # -- cargo hold ----------------------------------------------------------
 
     def sell_cargo(self, player, room_id: str, result_cls):
-        """Sell the whole hold to the pad's buyer, or refuse a mixed load."""
+        """Sell every fish of the buyer's species. Leave the rest in the hold."""
         from items import is_ancient_fish_id
 
         try:
@@ -2160,32 +2159,35 @@ class GarageEngine:
         wanted_id = buyer_species_id(buyer)
         wanted = _fish_named(wanted_id)
         species_name = wanted.name if wanted else wanted_id
-        odd = [
+        selling = [
             item for item in ship.cargo
-            if item.id != wanted_id or is_ancient_fish_id(item.id)
+            if item.id == wanted_id and not is_ancient_fish_id(item.id)
         ]
-        if odd:
-            names = ", ".join(item.display_name for item in odd[:4])
-            extra = "" if len(odd) <= 4 else f" (+{len(odd) - 4} more)"
+        if not selling:
             return self._result(
                 result_cls,
-                f"{buyer['name']} wants only {species_name}, the whole hold. "
-                f"Still in there: {names}{extra}.",
+                f"{buyer['name']} doesn't see any {species_name} in the hold.",
             )
         total = sum(
             max(1, int(item.value or 0)) * CARGO_BUY_MULTIPLIER
-            for item in ship.cargo
+            for item in selling
         )
-        count = len(ship.cargo)
-        ship.cargo = []
+        count = len(selling)
+        ship.cargo = [
+            item for item in ship.cargo
+            if item.id != wanted_id or is_ancient_fish_id(item.id)
+        ]
         player.gold += total
         player.total_gold_earned += total
         self.save_ships()
+        left = ""
+        if ship.cargo:
+            left = f" {len(ship.cargo)} other fish stay in the hold."
         return self._result(
             result_cls,
-            f"{buyer['name']} takes all {count} {species_name} from the hold "
-            f"and pays {total} gold. You have {player.gold} gold.",
-            [Broadcast(room_id, f"{buyer['name']} buys a hold of {species_name}.")],
+            f"{buyer['name']} takes {count} {species_name} from the hold "
+            f"and pays {total} gold.{left} You have {player.gold} gold.",
+            [Broadcast(room_id, f"{buyer['name']} buys {species_name} from a hold.")],
         )
 
     def cargo_ship_for(self, player) -> Tuple[Optional[Ship], Optional[str]]:
@@ -2455,7 +2457,7 @@ BACK GARAGE (south of Slick's Surplus):
   recharge / autopilot  - Shields and auto
   leave / leaveship     - After you set down and open up
 
-SKIPJACK (any pad off Alpha Prime):
+SKIPJACK (any pad off Earth):
   list / buy ship / sell ship   - 10000g hull, one per pilot, sells hull + modules
                                   (buy ship asks you to name it first)
   rename <name>                - Rename it while it is parked on this pad
@@ -2464,6 +2466,6 @@ SKIPJACK (any pad off Alpha Prime):
   modules / install <module> / uninstall <engine|hyper|cargo>
   Dell at the Forge buys and sells upgrade modules (list / buy / sell).
   At Cinder Lot, Rigel Exchange, Deneb Yard, and Drift Station,
-  sell cargo dumps a hold that is entirely the species that buyer wants
-  (they pay 3× the listed value).
+  sell cargo sells every fish of the species that buyer wants
+  and leaves the rest in the hold (they pay 3× the listed value).
 """
