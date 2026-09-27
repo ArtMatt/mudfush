@@ -34,7 +34,12 @@ from market import (
     create_random_norm_fish_quest,
 )
 from lake_state import LakeCycleState, UNIQUE_FISH_SPECS
-from fishermen import Fisherman, FishermanManager, NPC_CATCH_MAX_SECONDS
+from fishermen import (
+    SHARE_CHARISMA,
+    Fisherman,
+    FishermanManager,
+    NPC_CATCH_MAX_SECONDS,
+)
 
 if TYPE_CHECKING:
     from weather import WeatherSystem
@@ -341,6 +346,7 @@ class GameCommands:
         if self.garage:
             handled = self.garage.handle(player, command, args, CommandResult)
             if handled is not None:
+                self._end_fish_share_if_left(player)
                 return handled
 
         return CommandResult(f"Unknown command: '{command}'. Type 'help' for a list of commands.")
@@ -427,6 +433,7 @@ class GameCommands:
         player.jail_release_at = time.time() + lock_seconds
         player.current_room = "jail"
         jail.players.add(player.name)
+        self._end_fish_share_if_left(player)
 
         leave_broadcast = ""
         if old_room and old_room.id != "jail":
@@ -603,6 +610,7 @@ class GameCommands:
         new_room = self.rooms.get(new_room_id)
         player.current_room = new_room_id
         new_room.players.add(player.name)
+        self._end_fish_share_if_left(player)
 
         slick_rooms = {"slick_store", CEELO_ROOM_ID}
         if old_room.id in slick_rooms and new_room_id not in slick_rooms:
@@ -1469,9 +1477,16 @@ class GameCommands:
         if self.fishermen:
             fisherman = self.fishermen.in_room(room.id)
             if fisherman and fisherman.matches_target(target):
+                note = ""
+                share = self.fishermen.active_share_for(fisherman.name)
+                if (
+                    share is not None
+                    and share.player_name.lower() == player.name.lower()
+                ):
+                    note = "\nThey're keeping what they catch for you."
                 return CommandResult(
                     f"\n{fisherman.display.upper()}\n"
-                    f"{fisherman.description}"
+                    f"{fisherman.description}{note}"
                 )
         for npc in room.npcs:
             if target == npc.lower():
@@ -2386,6 +2401,7 @@ class GameCommands:
             self._hook_broadcast(fisherman.display),
             self._catch_broadcast(fisherman.display, caught, excitement),
             reel_seconds,
+            caught,
         )
 
     def _fish_weight_hint(self, weight: float) -> str:
@@ -2773,6 +2789,13 @@ class GameCommands:
                     broadcasts.append(
                         f"ROOM:{room.id}:{local.display} says, {reply}"
                     )
+                    if named == local:
+                        offer = self._fish_share_offer(player, local)
+                        if offer:
+                            lines.append(f"{local.display} says, {offer}")
+                            broadcasts.append(
+                                f"ROOM:{room.id}:{local.display} says, {offer}"
+                            )
                 elif state == "ignored":
                     reaction = (
                         f"{local.display} ignores you and watches the line."
@@ -2948,6 +2971,27 @@ class GameCommands:
         return CommandResult(
             message="\n".join(lines),
             broadcast="|".join(broadcasts),
+        )
+
+    def _end_fish_share_if_left(self, player: Player) -> None:
+        """Drop a stringer deal when the patron is no longer in that room."""
+        if self.fishermen:
+            self.fishermen.end_share_if_left(player.name, player.current_room)
+
+    def _fish_share_offer(self, player: Player, fisherman: Fisherman) -> Optional[str]:
+        """Hire the fisherman, or explain why this talk did not."""
+        if player.get_effective_attribute("charisma") < SHARE_CHARISMA:
+            return None
+        status = self.fishermen.start_share(
+            player.name, fisherman.name, player.current_room
+        )
+        if status == "busy":
+            return '"I\'m already keeping a stringer for somebody else."'
+        if status == "renewed":
+            return '"I\'ll keep at it a while longer."'
+        return (
+            '"I\'ll keep what I catch and hand it to you. '
+            'Stay close. About fifteen minutes."'
         )
 
     def _fisherman_fishing_hint(
@@ -3301,6 +3345,7 @@ SHOPPING (at Bubba's or Slick's):
 
 SOCIAL:
   say <message>         - Talk to others in the room
+  (A fisherman who knows you may fish for you if you use their name and stay.)
   nod <player/npc>      - Nod at someone
   tip <amount> <name>   - Give gold to a player or NPC
   give <item> <player>  - Give an item to another player
@@ -3883,6 +3928,7 @@ TIPS:
             exterior = self.rooms.get("slick_exterior")
             player.current_room = "slick_exterior"
             exterior.players.add(player.name)
+            self._end_fish_share_if_left(player)
             
             slick_responses = [
                 "Slick's eye twitches. \"What do you think this is, a karaoke bar? GET OUT!\"",

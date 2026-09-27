@@ -425,6 +425,7 @@ class FishingMUD:
             self.rooms["slick_store"].players.add(player.name)
             player.current_room = "slick_store"
             player.ceelo_kicked_visit_id = player.slick_visit_id
+            self.fishermen.end_share_if_left(player.name, player.current_room)
             kicked.append(player.name)
             session = self.sessions.get(player.name)
             if session:
@@ -531,7 +532,17 @@ class FishingMUD:
         """Let lake NPCs occasionally hook and land fish in their rooms."""
         async def one_loop(npc_name: str):
             while True:
-                await asyncio.sleep(random.randint(90, 180))
+                wait = random.randint(90, 180)
+                share = self.fishermen.active_share_for(npc_name)
+                if share is not None:
+                    remaining = share.expires_at - time.time()
+                    if remaining <= wait:
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
+                        if self.fishermen.expire_share(share):
+                            await self._announce_share_done(share)
+                        continue
+                await asyncio.sleep(wait)
                 if npc_name in self._npc_fishing:
                     continue
                 if self._npc_restock_imminent():
@@ -541,15 +552,25 @@ class FishingMUD:
                 result = self.commands.try_npc_catch(npc, room_id)
                 if not result:
                     continue
-                hook, catch, delay = result
+                hook, catch, delay, fish = result
                 if self._npc_restock_imminent(delay):
                     continue
-                await self._play_npc_catch(npc.name, room_id, hook, catch, delay)
+                await self._play_npc_catch(
+                    npc.name, room_id, hook, catch, delay, fish
+                )
 
         self._fisherman_fish_tasks = [
             asyncio.create_task(one_loop(npc.name)) for npc in FISHERMEN
         ]
         logger.info("Lake fishermen will occasionally catch fish")
+
+    async def _announce_share_done(self, share) -> None:
+        """Tell the room the stringer deal has run out."""
+        npc = next(person for person in FISHERMEN if person.name == share.fisherman_name)
+        await self.broadcast_to_room(
+            share.room_id,
+            f'{npc.display} says, "That\'s the last one I can spare."',
+        )
 
     async def _play_npc_catch(
         self,
@@ -558,14 +579,48 @@ class FishingMUD:
         hook: str,
         catch: str,
         delay: float,
+        fish=None,
     ) -> None:
         self._npc_fishing.add(npc_name)
+        share = None
+        if fish is not None:
+            share = self.fishermen.hooked_share(npc_name, room_id)
         try:
             await self.broadcast_to_room(room_id, hook)
             await asyncio.sleep(delay)
-            await self.broadcast_to_room(room_id, catch)
+            if self._hand_off_shared_catch(share, room_id, fish):
+                npc = next(person for person in FISHERMEN if person.name == npc_name)
+                await self.broadcast_to_room(
+                    room_id,
+                    f"{npc.display} hands a {fish.weight} lb {fish.display_name} "
+                    f"to {share.player_name}.",
+                )
+                if self.fishermen.expire_share(share):
+                    await self._announce_share_done(share)
+            else:
+                await self.broadcast_to_room(room_id, catch)
         finally:
             self._npc_fishing.discard(npc_name)
+
+    def _hand_off_shared_catch(self, share, room_id: str, fish) -> bool:
+        """
+        Give a landed fish to the patron who was hired when it hooked.
+
+        A fish already on the line is still handed over if the timer ran out
+        during the reel. Leaving, or hiring a new deal, drops it.
+        The gift does not count as the player's own catch.
+        """
+        if share is None or fish is None:
+            return False
+        if not self.fishermen.still_hooked(share):
+            return False
+        if not self.fishermen.patron_in_room(share):
+            return False
+        player = self.player_manager.get_player(share.player_name)
+        if player is None or player.current_room != room_id:
+            return False
+        player.add_item(fish)
+        return True
 
     async def start_ground_loot_resets(self, interval: int = 3600):
         """Clear and respawn ground items every hour."""
@@ -631,6 +686,7 @@ class FishingMUD:
                     if not session or not session.player:
                         continue
                     session.player.current_room = room_id
+                    self.fishermen.end_share_if_left(name, room_id)
                     room = self.rooms.get(room_id)
                     if room:
                         await session.send_message(
@@ -1124,6 +1180,7 @@ Admin console commands:
 
     async def _apply_player_reset(self, source: Player, online: bool) -> str:
         self.commands.release_unique_fish(source)
+        self.fishermen.end_share_for_player(source.name)
         fresh = self.player_manager.create_reset_player(source)
 
         if online:
@@ -2018,6 +2075,7 @@ class MUDSession:
             player_name = self.player.name
             self.player.clear_slick_visit()
             self.game.commands.release_unique_fish(self.player)
+            self.game.fishermen.end_share_for_player(player_name)
             
             # Remove from room
             room = self.game.rooms.get(self.player.current_room)

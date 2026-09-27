@@ -12,6 +12,8 @@ from world import Room
 
 FISHERMAN_COOLDOWN_SECONDS = 60
 NPC_CATCH_MAX_SECONDS = 25
+SHARE_CHARISMA = 12
+SHARE_SECONDS = 15 * 60
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,16 @@ FISHERMEN = (
 )
 
 
+@dataclass
+class FishShare:
+    """One patron hiring one fisherman to hand over catches."""
+
+    player_name: str
+    fisherman_name: str
+    room_id: str
+    expires_at: float
+
+
 class FishermanManager:
     """Assign one unique fisherman to every fishing room and manage interactions."""
 
@@ -109,6 +121,8 @@ class FishermanManager:
         }
         self._cooldowns: Dict[Tuple[str, str], float] = {}
         self._ignored_once: set[Tuple[str, str]] = set()
+        self._shares_by_player: Dict[str, FishShare] = {}
+        self._shares_by_fisher: Dict[str, FishShare] = {}
         self._sync_room_displays()
 
     def _sync_room_displays(self) -> None:
@@ -162,8 +176,118 @@ class FishermanManager:
             return "ignored"
         return "silent"
 
+    def start_share(
+        self,
+        player_name: str,
+        fisherman_name: str,
+        room_id: str,
+        now: Optional[float] = None,
+    ) -> str:
+        """
+        Hire this fisherman to hand their catches to one player.
+
+        Returns started, renewed, or busy. An expired deal is dropped first.
+        Renewing keeps the same session, so a fish already on the line
+        still belongs to this player.
+        """
+        current = time.time() if now is None else now
+        existing = self._shares_by_fisher.get(fisherman_name)
+        if existing is not None and existing.expires_at <= current:
+            self._drop_share(existing)
+            existing = None
+        if (
+            existing is not None
+            and existing.player_name.lower() != player_name.lower()
+        ):
+            return "busy"
+
+        mine = self._shares_by_player.get(player_name.lower())
+        if mine is not None and mine is not existing:
+            self._drop_share(mine)
+        if existing is not None:
+            existing.expires_at = current + SHARE_SECONDS
+            existing.room_id = room_id
+            return "renewed"
+
+        share = FishShare(
+            player_name=player_name,
+            fisherman_name=fisherman_name,
+            room_id=room_id,
+            expires_at=current + SHARE_SECONDS,
+        )
+        self._shares_by_player[player_name.lower()] = share
+        self._shares_by_fisher[fisherman_name] = share
+        return "started"
+
+    def active_share_for(
+        self,
+        fisherman_name: str,
+        now: Optional[float] = None,
+    ) -> Optional["FishShare"]:
+        """The live deal for this fisherman, if it has not run out."""
+        share = self._shares_by_fisher.get(fisherman_name)
+        if share is None:
+            return None
+        current = time.time() if now is None else now
+        if share.expires_at <= current:
+            return None
+        return share
+
+    def hooked_share(
+        self,
+        fisherman_name: str,
+        room_id: str,
+        now: Optional[float] = None,
+    ) -> Optional["FishShare"]:
+        """The deal a fish on the line belongs to, if the patron is still here."""
+        share = self.active_share_for(fisherman_name, now)
+        if share is None or share.room_id != room_id:
+            return None
+        if self.assignments.get(fisherman_name) != room_id:
+            return None
+        if not self.patron_in_room(share):
+            return None
+        return share
+
+    def still_hooked(self, share: "FishShare") -> bool:
+        """True if this same deal is still the fisherman's current one."""
+        return self._shares_by_fisher.get(share.fisherman_name) is share
+
+    def patron_in_room(self, share: "FishShare") -> bool:
+        room = self.rooms.get(share.room_id)
+        return room is not None and share.player_name in room.players
+
+    def expire_share(self, share: "FishShare", now: Optional[float] = None) -> bool:
+        """Drop this deal if it is still current and its time is up."""
+        if self._shares_by_fisher.get(share.fisherman_name) is not share:
+            return False
+        current = time.time() if now is None else now
+        if current < share.expires_at:
+            return False
+        self._drop_share(share)
+        return True
+
+    def end_share_for_player(self, player_name: str) -> None:
+        share = self._shares_by_player.get(player_name.lower())
+        if share is not None:
+            self._drop_share(share)
+
+    def end_share_if_left(self, player_name: str, room_id: str) -> None:
+        """End the deal when the patron is no longer in the hired room."""
+        share = self._shares_by_player.get(player_name.lower())
+        if share is not None and share.room_id != room_id:
+            self._drop_share(share)
+
+    def _drop_share(self, share: "FishShare") -> None:
+        if self._shares_by_fisher.get(share.fisherman_name) is share:
+            del self._shares_by_fisher[share.fisherman_name]
+        if self._shares_by_player.get(share.player_name.lower()) is share:
+            del self._shares_by_player[share.player_name.lower()]
+
     def relocate(self) -> List[Tuple[Fisherman, str, str]]:
         """Move every fisherman to a different fishing room."""
+        self._shares_by_player.clear()
+        self._shares_by_fisher.clear()
         if len(FISHERMEN) < 2:
             return []
         old_rooms = [self.assignments[npc.name] for npc in FISHERMEN]
