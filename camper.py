@@ -74,6 +74,7 @@ DELL_PAD_ID = "beta_forge"       # Dell buys and sells upgrade modules here
 MODULE_BUYBACK = 0.5             # Dell pays half for a loose module
 CARGO_WORDS = frozenset({"cargo", "hold", "cargohold"})
 CARGO_CYCLE_SECONDS = 3 * 60 * 60
+CARGO_BUY_MULTIPLIER = 3        # off-planet buyers pay triple listed value
 # Older saves parked on Alpha Minor before it became Europa.
 DOCK_ALIASES = {"alpha_minor": "europa"}
 
@@ -1886,6 +1887,7 @@ class GarageEngine:
             )
             lines.append(
                 f"  The whole hold has to be {species_name}. "
+                f"Pays {CARGO_BUY_MULTIPLIER}× listed value. "
                 "A mixed load is refused. Type 'sell cargo'."
             )
         lines.append("")
@@ -2034,7 +2036,10 @@ class GarageEngine:
                 f"{buyer['name']} wants only {species_name}, the whole hold. "
                 f"Still in there: {names}{extra}.",
             )
-        total = sum(max(1, int(item.value or 0)) for item in ship.cargo)
+        total = sum(
+            max(1, int(item.value or 0)) * CARGO_BUY_MULTIPLIER
+            for item in ship.cargo
+        )
         count = len(ship.cargo)
         ship.cargo = []
         player.gold += total
@@ -2321,5 +2326,6 @@ SKIPJACK (any pad off Alpha Prime):
   modules / install <module> / uninstall <engine|hyper|cargo>
   Dell at the Forge buys and sells upgrade modules (list / buy / sell).
   At Cinder Lot, Rigel Exchange, Deneb Yard, and Drift Station,
-  sell cargo dumps a hold that is entirely the species that buyer wants.
+  sell cargo dumps a hold that is entirely the species that buyer wants
+  (they pay 3× the listed value).
 """
