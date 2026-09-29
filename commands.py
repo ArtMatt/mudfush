@@ -1079,6 +1079,11 @@ class GameCommands:
         """Use a carried consumable, or feed a fish into a specialty lure."""
         if not item_name:
             return CommandResult("Use what?")
+        selector = self._all_selector(item_name)
+        if selector is not None:
+            if not selector:
+                return CommandResult("Use all of what?")
+            return self._feed_all_to_jig(player, selector)
         lure, fish = self._find_lure_and_fish(player, item_name)
         if lure and fish:
             return self._feed_specialty_lure(player, lure, fish)
@@ -1192,6 +1197,11 @@ class GameCommands:
             return CommandResult(
                 "Feed what? Usage: feed <jig> <fish> (or give <fish> to cliff)"
             )
+        selector = self._all_selector(args)
+        if selector is not None:
+            if not selector:
+                return CommandResult("Feed all of what?")
+            return self._feed_all_to_jig(player, selector)
         lure, fish = self._find_lure_and_fish(player, args)
         if lure and fish:
             return self._feed_specialty_lure(player, lure, fish)
@@ -1270,12 +1280,7 @@ class GameCommands:
             if not left or not right or key in seen:
                 continue
             seen.add(key)
-            first = self._find_typed_item(
-                player, left, specialty_lure=True
-            ) or self._find_typed_item(player, left, item_type=ItemType.FISH)
-            second = self._find_typed_item(
-                player, right, item_type=ItemType.FISH
-            ) or self._find_typed_item(player, right, specialty_lure=True)
+            first, second = self._resolve_use_pair(player, left, right)
             if not first or not second or first is second:
                 continue
             lure = first if first.is_specialty_lure() else second
@@ -1283,6 +1288,149 @@ class GameCommands:
             if lure.is_specialty_lure() and fish.item_type == ItemType.FISH:
                 return lure, fish
         return None, None
+
+    def _resolve_use_pair(
+        self, player: Player, left: str, right: str
+    ) -> tuple[Optional[Item], Optional[Item]]:
+        """Resolve the two sides of 'use'. A number is that inventory slot."""
+        left_num = left.strip().rstrip(")").isdigit()
+        right_num = right.strip().rstrip(")").isdigit()
+        if left_num or right_num:
+            left_item = player.find_item(left.strip().rstrip(")")) if left_num else None
+            right_item = player.find_item(right.strip().rstrip(")")) if right_num else None
+            if left_num and right_num:
+                return left_item, right_item
+            if left_num:
+                return left_item, self._opposite_use_item(player, left_item, right)
+            return self._opposite_use_item(player, right_item, left), right_item
+        first = self._find_typed_item(
+            player, left, specialty_lure=True
+        ) or self._find_typed_item(player, left, item_type=ItemType.FISH)
+        second = self._find_typed_item(
+            player, right, item_type=ItemType.FISH
+        ) or self._find_typed_item(player, right, specialty_lure=True)
+        return first, second
+
+    def _opposite_use_item(
+        self, player: Player, known: Optional[Item], query: str
+    ) -> Optional[Item]:
+        """The named piece opposite a numbered fish or jig."""
+        if known is None:
+            return None
+        if known.is_specialty_lure():
+            return self._find_typed_item(player, query, item_type=ItemType.FISH)
+        if known.item_type == ItemType.FISH:
+            return self._find_typed_item(player, query, specialty_lure=True)
+        return None
+
+    def _feed_all_to_jig(self, player: Player, query: str) -> CommandResult:
+        """Hand Cliff every matching fish for the jig that takes that species."""
+        if player.current_room != "bubba_workshop":
+            return CommandResult(
+                "Cliff works jigs in the workshop west of the store porch. "
+                "That's where you hand him a fish."
+            )
+        matches = [
+            item for item in items_matching(player.inventory, query)
+            if item.item_type == ItemType.FISH
+            and not player.is_wearing_or_equipped(item)
+        ]
+        if not matches:
+            return CommandResult(f"You're not carrying any '{query}'.")
+        usable = [
+            fish for fish in matches
+            if fish.id not in LURE_FORBIDDEN_SPECIES
+            and not is_ancient_fish_id(fish.id)
+        ]
+        if not usable:
+            return CommandResult(
+                'Cliff backs up a step. "I don\'t put that one on a jig. '
+                'You keep it."'
+            )
+
+        lure = self._jig_for_species(player, usable)
+        if lure is None:
+            if any(item.is_specialty_lure() for item in player.inventory):
+                held = next(item for item in player.inventory if item.is_specialty_lure())
+                return self._feed_specialty_lure(player, held, usable[0])
+            return CommandResult(
+                "You need a custom jig before Cliff can dress a fish for you."
+            )
+        if lure.attracts_fish_id:
+            usable = [fish for fish in usable if fish.id == lure.attracts_fish_id]
+        else:
+            species_id = usable[0].id
+            usable = [fish for fish in usable if fish.id == species_id]
+        if not usable:
+            return CommandResult(f"You're not carrying any '{query}'.")
+
+        fed = 0
+        stopped = False
+        for fish in list(usable):
+            if lure.species_attraction_multiplier() >= SPECIALTY_LURE_MAX_MULT:
+                stopped = True
+                break
+            result = self._feed_specialty_lure(player, lure, fish)
+            still_held = any(item is fish for item in player.inventory)
+            if still_held:
+                if "wearing all it can" in result.message:
+                    stopped = True
+                    break
+                return result
+            fed += 1
+        if fed == 0:
+            return CommandResult(
+                'Cliff glances at the jig. "That one\'s wearing all it can. '
+                'You keep the fish."'
+            )
+        species = self._fish_species_by_id(lure.attracts_fish_id)
+        species_name = species.name if species else lure.attracts_fish_id
+        multiplier = lure.species_attraction_multiplier()
+        lines = [
+            f"You hand Cliff {fed} {species_name}.",
+            "He works through the pile and hands the jig back. "
+            f"(Now {multiplier:.2f}× for that species, "
+            f"{lure.lure_essence:.1f} typical {species_name}.)",
+        ]
+        if stopped:
+            lines.append(
+                "Cliff says that's all the jig will take. You keep the rest."
+            )
+        left = [
+            fish for fish in matches
+            if any(item is fish for item in player.inventory)
+        ]
+        if left:
+            lines.append("Left in your pack:")
+            lines.extend(f"  - {fish.display_name}" for fish in left)
+        return CommandResult(
+            message="\n".join(lines),
+            broadcast=(
+                f"ROOM:{player.current_room}:{player.name} hands Cliff "
+                f"a pile of {species_name}."
+            ),
+        )
+
+    def _jig_for_species(self, player: Player, fish: list) -> Optional[Item]:
+        """The jig already dressed for one of these fish, else a blank jig."""
+        species_ids = {item.id for item in fish}
+        attuned = next(
+            (
+                item for item in player.inventory
+                if item.is_specialty_lure()
+                and item.attracts_fish_id in species_ids
+            ),
+            None,
+        )
+        if attuned is not None:
+            return attuned
+        return next(
+            (
+                item for item in player.inventory
+                if item.is_specialty_lure() and not item.attracts_fish_id
+            ),
+            None,
+        )
 
     def _feed_specialty_lure(
         self, player: Player, lure: Item, fish: Item
@@ -1382,11 +1530,16 @@ class GameCommands:
                 "This spot is already teeming with fish. You keep the chum sealed."
             )
 
-        player.remove_item(item)
+        item.charges -= 1
+        if item.charges <= 0:
+            player.remove_item(item)
+            left = "The bucket is empty."
+        else:
+            left = f"The bucket has {item.charges} uses left."
         return CommandResult(
             message=(
-                "You dump the bucket of chum into the water. An oily slick "
-                "spreads across the surface, drawing in more fish."
+                "You dump a scoop of chum into the water. An oily slick "
+                f"spreads across the surface, drawing in more fish. {left}"
             ),
             broadcast=(
                 f"ROOM:{room.id}:{player.name} dumps a bucket of chum into "
@@ -3411,6 +3564,7 @@ ITEMS:
   truck                - Look in your truck
   use <item>           - Use a consumable item
   use/feed <jig> <fish>  - Hand Cliff a fish to dress or improve a jig
+  use all <fish>        - Hand Cliff every matching fish for that jig
   inventory/inv/i [filter] - Show inventory (name or type/slot, e.g. inv hat, inv pole)
   inv gear              - Show all fishing poles and lures (equipped and carried)
   inv sort fish         - Keep gear in place; sort fish by species, quality, size
@@ -3431,7 +3585,7 @@ FISHING:
   sense <fish>        - Feel how likely a species is
   release <fish/#>    - Pay the lake; the commotion draws fish
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
-  chum/dump chum       - Use chum to briefly improve this fishing spot
+  chum/dump chum       - Use one scoop (a bucket holds 10) to briefly improve this spot
   weather             - Check weather
   (While reeling: type CUT or press Ctrl-G to snap the line)
 
@@ -3639,7 +3793,10 @@ TIPS:
             new_item = create_item_copy(item, condition=9)
         else:
             new_item = create_item_copy(item)
-        player.add_item(new_item)
+        received = player.add_item(new_item)
+        chum_note = ""
+        if item.id == "bucket_of_chum" and not received.startswith("You pick up"):
+            chum_note = f"\n{received}"
         if self.market and item.item_type == ItemType.WEARABLE:
             self.market.mark_clothing_purchased(store_type, player.name, item.id)
         
@@ -3659,7 +3816,7 @@ TIPS:
                 f"{slick_unlock}"
             )
         return CommandResult(
-            f"You buy a {new_item.display_name} for {price} gold.\n"
+            f"You buy a {new_item.display_name} for {price} gold.{chum_note}\n"
             f"You have {player.gold} gold remaining."
         )
     

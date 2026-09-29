@@ -391,6 +391,7 @@ def roll_wearable_modifier_value() -> int:
 
 # Chance an equipment item rolls two attribute bonuses instead of one
 DUAL_MODIFIER_CHANCE = 1e-1  # 10%
+CHUM_CAPACITY = 10  # uses in one bucket of chum
 
 
 def roll_modifiers(item_type: Optional[ItemType] = None) -> List[Tuple[str, int]]:
@@ -454,6 +455,7 @@ class Item:
     shard_progress: int = 0  # For shards: percentage toward becoming a gem
     attracts_fish_id: Optional[str] = None  # Specialty lure target species
     lure_essence: float = 0.0  # Sacrificed weight feeding a specialty lure
+    charges: int = 0  # Uses left in a bucket of chum
 
     def __post_init__(self):
         if self.modifiers:
@@ -461,6 +463,8 @@ class Item:
         elif self.modifier_attribute and self.modifier_value > 0:
             self.modifiers = [(self.modifier_attribute, self.modifier_value)]
         self._sync_legacy_modifiers()
+        if self.id == "bucket_of_chum":
+            self.charges = CHUM_CAPACITY if self.charges <= 0 else min(CHUM_CAPACITY, int(self.charges))
 
     def _sync_legacy_modifiers(self):
         """Keep first-mod legacy fields aligned with modifiers list."""
@@ -544,6 +548,8 @@ class Item:
     @property
     def plain_display_name(self) -> str:
         """Full item name without ANSI colors (matching, logs, uppercase)."""
+        if self.id == "bucket_of_chum":
+            return f"{self.name} ({self.charges}/{CHUM_CAPACITY})"
         if self.item_type in (ItemType.BEER, ItemType.CONSUMABLE):
             return self.name
         if self.item_type == ItemType.GEM:
@@ -562,6 +568,8 @@ class Item:
         Full item name including colored condition, fish size, and modifier.
         Examples: 'new wool cap', 'new wool cap of +1 CHA +2 STR'
         """
+        if self.id == "bucket_of_chum":
+            return f"{self.name} ({self.charges}/{CHUM_CAPACITY})"
         if self.item_type in (ItemType.BEER, ItemType.CONSUMABLE):
             return self.name
         if self.item_type == ItemType.GEM:
@@ -755,12 +763,13 @@ BUCKET_OF_CHUM = Item(
     id="bucket_of_chum",
     name="bucket of chum",
     description=(
-        "A sealed bucket of Bubba's pungent ground-fish mixture. Dumping it "
-        "into a fishing spot briefly draws more fish into the area."
+        "A sealed bucket of Bubba's pungent ground-fish mixture. It holds "
+        "10 uses. Dumping one into a fishing spot briefly draws more fish."
     ),
     item_type=ItemType.CONSUMABLE,
     value=12,
     condition=9,
+    charges=CHUM_CAPACITY,
 )
 
 LURE_KIT = Item(
@@ -1339,6 +1348,7 @@ def create_item_copy(
         shard_progress=item.shard_progress,
         attracts_fish_id=item.attracts_fish_id,
         lure_essence=item.lure_essence,
+        charges=item.charges,
     )
 
 
@@ -1367,6 +1377,7 @@ def item_to_save_dict(item: Item) -> Dict[str, Any]:
         "shard_progress": item.shard_progress,
         "attracts_fish_id": item.attracts_fish_id,
         "lure_essence": item.lure_essence,
+        "charges": item.charges,
     }
 
 
@@ -1402,6 +1413,7 @@ def item_from_save_dict(data: Dict[str, Any]) -> Item:
         shard_progress=int(data.get("shard_progress") or 0),
         attracts_fish_id=data.get("attracts_fish_id"),
         lure_essence=float(data.get("lure_essence") or 0.0),
+        charges=int(data["charges"]) if "charges" in data else 0,
     )
 
 

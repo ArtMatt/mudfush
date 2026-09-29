@@ -13,7 +13,8 @@ from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
 from items import (
     Item, ItemType, WearSlot, is_ancient_fish_id, ancient_base_fish_id,
-    item_to_save_dict, item_from_save_dict,
+    item_to_save_dict, item_from_save_dict, CHUM_CAPACITY, BUCKET_OF_CHUM,
+    create_item_copy,
 )
 
 
@@ -387,8 +388,40 @@ class Player:
     
     def add_item(self, item: Item) -> str:
         """Add an item to the player's inventory."""
+        if item.id == "bucket_of_chum":
+            return self._receive_chum(item)
         self.inventory.append(item)
         return f"You pick up the {item.display_name}."
+
+    def _receive_chum(self, item: Item) -> str:
+        """Pour a bucket into one the player already carries, spilling past 10."""
+        incoming = min(CHUM_CAPACITY, item.charges if item.charges > 0 else CHUM_CAPACITY)
+        target = next(
+            (
+                held for held in self.inventory
+                if held.id == "bucket_of_chum" and held.charges < CHUM_CAPACITY
+            ),
+            None,
+        )
+        if target is None:
+            item.charges = incoming
+            self.inventory.append(item)
+            return f"You pick up the {item.display_name}."
+        total = target.charges + incoming
+        if total <= CHUM_CAPACITY:
+            target.charges = total
+            return (
+                f"You pour it into the bucket you already have "
+                f"({target.charges}/{CHUM_CAPACITY})."
+            )
+        target.charges = CHUM_CAPACITY
+        extra = create_item_copy(BUCKET_OF_CHUM, roll_stats=False)
+        extra.charges = total - CHUM_CAPACITY
+        self.inventory.append(extra)
+        return (
+            f"You fill one bucket ({CHUM_CAPACITY}/{CHUM_CAPACITY}) and put "
+            f"the remaining {extra.charges} uses in a new bucket."
+        )
     
     def remove_item(self, item: Item) -> str:
         """Remove an item from the player's inventory."""

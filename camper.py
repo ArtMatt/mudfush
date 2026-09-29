@@ -55,13 +55,26 @@ class ShipState(str, Enum):
     DISABLED = "disabled"
 
 
+class DockState(str, Enum):
+    """SWL shipstate2: ship-to-ship docking runs beside the flight state."""
+    NONE = "none"
+    DOCK = "dock"
+    DOCK_2 = "dock_2"
+    DOCK_3 = "dock_3"       # locked together
+
+
 LAND_RANGE = 200          # how close you must be to set down
+DOCK_RANGE = 200          # per-axis box for docking with another ship
 ORBIT_RANGE = 200         # snap into orbit this close to a planet
 COORD_UPDATE_SECONDS = 15 # cockpit position ping while flying
 RENT_GOLD = 5             # a little to take the public Airstream out
 CAMPER_KEY_ID = "camper_key"
 PUBLIC_SHIP_ID = "public_airstream"
 PUBLIC_OWNER = "Public"
+DRIFTER_SHIP_ID = "drifter"
+DRIFTER_NAME = "The Drifter"
+DRIFTER_OWNER = "Autopilot"
+DRIFTER_CRUISE_SECONDS = 5 * 60
 SHIPS_PATH = Path("saves/.ships.json")
 
 # Hulls. The Airstream is the garage rental; the Skipjack is the two-room
@@ -99,13 +112,33 @@ class LandingPad:
     z: int
 
 
+BODY_PLANET = "planet"
+BODY_MOON = "moon"
+BODY_STATION = "station"
+BODY_KINDS = (BODY_PLANET, BODY_MOON, BODY_STATION)
+
+
 @dataclass
 class Planet:
+    """A body a ship can orbit and land on. Planet, moon, or station: same rules."""
     name: str
     x: int
     y: int
     z: int
     pads: List[LandingPad] = field(default_factory=list)
+    kind: str = BODY_PLANET
+
+    @property
+    def label(self) -> str:
+        return self.kind.upper()
+
+
+def Moon(name: str, x: int, y: int, z: int, pads: List[LandingPad]) -> Planet:
+    return Planet(name, x, y, z, pads, kind=BODY_MOON)
+
+
+def Station(name: str, x: int, y: int, z: int, pads: List[LandingPad]) -> Planet:
+    return Planet(name, x, y, z, pads, kind=BODY_STATION)
 
 
 @dataclass
@@ -181,6 +214,8 @@ class Ship:
     jumpz: float = 0.0
     hyperdistance: int = 0
     autopilot: bool = False
+    automated: bool = False          # The Drifter: flies itself, never for sale
+    cruise_left: int = 0             # seconds of realspace flight before the next jump
     target: Optional["Ship"] = None
     home: str = ""
     orbit: Optional[str] = None  # planet name while held in orbit
@@ -192,6 +227,17 @@ class Ship:
         default_factory=lambda: {"engine": None, "hyper": None, "cargo": None}
     )
     cargo_capacity: int = 0      # lbs of fish the hold takes
+    dock_state: DockState = DockState.NONE
+    docked_ship: Optional["Ship"] = None   # the hull we're locked to (or approaching)
+
+    def docking_in_progress(self) -> bool:
+        return self.dock_state in (DockState.DOCK, DockState.DOCK_2)
+
+    def is_docked_with(self) -> Optional["Ship"]:
+        """The ship we're locked to, once the sequence has finished."""
+        if self.dock_state == DockState.DOCK_3 and self.docked_ship is not None:
+            return self.docked_ship
+        return None
 
     def matches(self, name: str) -> bool:
         needle = name.strip().lower()
@@ -625,7 +671,7 @@ def default_starsystems() -> List[StarSystem]:
             Planet("Earth", 1000, 1000, 1000, [
                 LandingPad("Back Garage", GARAGE_ROOM_ID, 1000, 1000, 1000),
             ]),
-            Planet("Europa", -1800, 900, 2200, [
+            Moon("Europa", -1800, 900, 2200, [
                 _landing("europa", -1800, 900, 2200),
             ]),
         ],
@@ -694,7 +740,7 @@ def default_starsystems() -> List[StarSystem]:
         name="Void", galaxy_x=-1500, galaxy_y=-5500,
         stars=[],
         planets=[
-            Planet("Drift", 0, 0, 0, [
+            Station("Drift", 0, 0, 0, [
                 _landing("void_drift", 0, 0, 0),
             ]),
         ],
@@ -768,15 +814,19 @@ class GarageEngine:
             for pad in system.pads():
                 self._pad_index[pad.room_id] = pad
         self.load_ships()
+        self._ensure_drifter()
         self.ensure_cockpit_rooms()
 
     def attach_rooms(self, rooms: Dict[str, "Room"]) -> None:
         """Keep ship interiors after a world rebuild."""
         self.rooms = rooms
         self.ensure_cockpit_rooms()
+        self._stock_drifter_gem()
 
     def owned_ship_for(self, player_name: str) -> Optional[Ship]:
         for ship in self.ships:
+            if ship.automated:
+                continue
             if ship.owner.lower() == player_name.lower() and ship.owner != PUBLIC_OWNER:
                 return ship
         return None
@@ -836,7 +886,19 @@ class GarageEngine:
             if not ship.cockpit_room:
                 continue
             if ship.cockpit_room not in self.rooms:
-                if ship.is_skipjack():
+                if ship.automated:
+                    description = (
+                        "Nobody is flying The Drifter. The pilot seat is empty "
+                        "and the console runs itself: a racing engine and a "
+                        "deep-space hyperdrive, both locked in. It holds a "
+                        "heading for five minutes, then jumps.\n\n"
+                        "A gem sits on the copilot chair when the route is "
+                        "fresh. Take it and get back to your own ship, then "
+                        "DETACH. The autopilot will not release the lock from "
+                        "this side."
+                    )
+                    exits = {}
+                elif ship.is_skipjack():
                     description = (
                         "The Skipjack's cockpit is two seats and a wrap-around "
                         "console that has been repaired more than once. The "
@@ -907,7 +969,13 @@ class GarageEngine:
 
     def save_ships(self) -> None:
         SHIPS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"ships": [self._ship_to_save(ship) for ship in self.ships]}
+        payload = {
+            "ships": [
+                self._ship_to_save(ship)
+                for ship in self.ships
+                if not ship.automated
+            ]
+        }
         SHIPS_PATH.write_text(json.dumps(payload, indent=2))
 
     def load_ships(self) -> None:
@@ -921,6 +989,8 @@ class GarageEngine:
         by_id = {ship.ship_id: ship for ship in self.ships if ship.ship_id}
         for entry in saved:
             ship_id = entry.get("ship_id") or ""
+            if ship_id == DRIFTER_SHIP_ID:
+                continue
             dock = entry.get("lastdoc") or entry.get("location") or GARAGE_ROOM_ID
             dock = DOCK_ALIASES.get(dock, dock)
             if dock not in self._pad_index:
@@ -1069,7 +1139,120 @@ class GarageEngine:
         self._apply_orbits(notes)
         if self._ticks % COORD_UPDATE_SECONDS == 0:
             self._echo_positions(notes)
+        self._tick_drifter(notes)
         return notes
+
+    def drifter(self) -> Optional[Ship]:
+        return next((ship for ship in self.ships if ship.automated), None)
+
+    def _ensure_drifter(self) -> None:
+        """The unmanned ship. Recreated in flight on every boot, never sold."""
+        if self.drifter() is not None:
+            return
+        ship = Ship(
+            name=DRIFTER_NAME,
+            owner=DRIFTER_OWNER,
+            ship_id=DRIFTER_SHIP_ID,
+            cockpit_room="drifter_cockpit",
+            hull_type=HULL_SKIPJACK,
+            locked=False,
+            hatch_open=False,
+            autopilot=True,
+            automated=True,
+            modules={"engine": "engine_racing", "hyper": "hyper_deep", "cargo": None},
+        )
+        ship.apply_modules()
+        self.ships.append(ship)
+        self.ensure_cockpit_rooms()
+        self._launch_drifter(ship, [])
+
+    def _open_space_point(self) -> Tuple[float, float, float]:
+        """A spot clear of the local planets, moons, and stations."""
+        return tuple(
+            random.choice((-1.0, 1.0)) * random.randint(4000, 8000)
+            for _ in range(3)
+        )
+
+    def _stock_drifter_gem(self) -> None:
+        from items import ItemType, create_gem
+
+        ship = self.drifter()
+        if ship is None:
+            return
+        room = self.rooms.get(ship.cockpit_room)
+        if room is None:
+            return
+        if any(item.item_type == ItemType.GEM for item in room.items):
+            return
+        room.items.append(create_gem())
+
+    def _arm_drifter_cruise(self, ship: Ship, notes: List[Broadcast]) -> None:
+        """Start five minutes of full-speed flight and leave a gem if needed."""
+        ship.autopilot = True
+        ship.state = ShipState.READY
+        ship.orbit = None
+        ship.currspeed = ship.realspeed
+        ship.cruise_left = DRIFTER_CRUISE_SECONDS
+        ship.hx = random.uniform(-1.0, 1.0) or 1.0
+        ship.hy = random.uniform(-1.0, 1.0)
+        ship.hz = random.uniform(-1.0, 1.0)
+        self._stock_drifter_gem()
+        self._echo_cockpit(
+            ship,
+            "The autopilot picks a heading and pushes the racing engine to full.",
+            notes,
+        )
+
+    def _launch_drifter(self, ship: Ship, notes: List[Broadcast]) -> None:
+        system = random.choice(self.systems)
+        x, y, z = self._open_space_point()
+        self._enter_system(ship, system, x, y, z)
+        self._arm_drifter_cruise(ship, notes)
+        self._echo_system(
+            system,
+            f"{ship.name} drops out of hyperspace and runs for open space.",
+            notes,
+        )
+
+    def _drifter_jump(self, ship: Ship, notes: List[Broadcast]) -> None:
+        origin = ship.starsystem
+        choices = [system for system in self.systems if system is not origin]
+        if not choices:
+            ship.cruise_left = DRIFTER_CRUISE_SECONDS
+            return
+        dest = random.choice(choices)
+        ship.jumpx, ship.jumpy, ship.jumpz = self._open_space_point()
+        ship.currjump = dest
+        ship.hyperdistance = max(1, _galaxy_distance(origin, dest)) if origin else 1
+        ship.orbit = None
+        ship.currspeed = 0
+        ship.state = ShipState.HYPERSPACE
+        if origin is not None:
+            self._echo_system(
+                origin, f"{ship.name} vanishes into hyperspace, bound for {dest.name}.", notes
+            )
+        self._leave_system(ship)
+        self._echo_cockpit(
+            ship, f"The autopilot jumps for {dest.name}. Stars smear into lines.", notes
+        )
+
+    def _tick_drifter(self, notes: List[Broadcast]) -> None:
+        """Cruise for five minutes, jump, repeat. A dock holds the clock."""
+        ship = self.drifter()
+        if ship is None:
+            return
+        if ship.docked_ship is not None:
+            ship.currspeed = 0
+            return
+        if ship.state == ShipState.HYPERSPACE:
+            return
+        if ship.cruise_left > 0:
+            ship.state = ShipState.READY
+            ship.currspeed = ship.realspeed
+            ship.cruise_left -= 1
+            if ship.cruise_left > 0:
+                return
+        self._drifter_jump(ship, notes)
 
     def _echo_cockpit(self, ship: Ship, message: str, notes: List[Broadcast]) -> None:
         notes.append(Broadcast(ship.cockpit_room, message))
@@ -1120,6 +1303,8 @@ class GarageEngine:
             ShipState.HYPERSPACE,
         )
         for ship in self.ships:
+            if ship.automated:
+                continue
             if ship.state in skip or not ship.starsystem:
                 continue
             bound = None
@@ -1160,14 +1345,37 @@ class GarageEngine:
                 ship.state = ShipState.ORBIT
             self._echo_cockpit(
                 ship,
-                f"The ship settles into orbit around {nearest.name}.",
+                f"The ship settles into orbit around the {nearest.kind} {nearest.name}.",
                 notes,
             )
+
+    def _echo_ship(self, ship: Ship, message: str, notes: List[Broadcast]) -> None:
+        """Everyone aboard, cockpit and hold alike."""
+        for room_id in ship.interior_rooms():
+            notes.append(Broadcast(room_id, message))
+
+    def _echo_system(self, system: Optional[StarSystem], message: str, notes: List[Broadcast]) -> None:
+        if system is None:
+            return
+        for ship in system.ships:
+            self._echo_cockpit(ship, message, notes)
 
     def _update_space(self, notes: List[Broadcast]) -> None:
         for ship in self.ships:
             if ship.laser_cool > 0:
                 ship.laser_cool -= 1
+
+            # A docked partner that is no longer in the same system lets go.
+            if ship.docked_ship is not None and (
+                ship.docked_ship.starsystem is None
+                or ship.docked_ship.starsystem is not ship.starsystem
+            ):
+                self._clear_dock(ship)
+
+            if ship.dock_state == DockState.DOCK_2:
+                self._finish_dock(ship, notes)
+            elif ship.dock_state == DockState.DOCK:
+                ship.dock_state = DockState.DOCK_2
 
             if ship.state == ShipState.HYPERSPACE:
                 ship.hyperdistance -= ship.hyperspeed * 2
@@ -1185,6 +1393,13 @@ class GarageEngine:
                             "The ship lurches slightly as it comes out of hyperspace.",
                             notes,
                         )
+                        if ship.automated:
+                            self._echo_system(
+                                dest,
+                                f"{ship.name} drops out of hyperspace and runs for open space.",
+                                notes,
+                            )
+                            self._arm_drifter_cruise(ship, notes)
                 else:
                     self._echo_cockpit(
                         ship,
@@ -1251,6 +1466,43 @@ class GarageEngine:
             notes,
         )
         self._echo_pad(pad_room, f"{ship.name} pulls out and is gone.", notes)
+
+    def _clear_dock(self, ship: Ship) -> None:
+        """Drop the docking link on both hulls."""
+        other = ship.docked_ship
+        ship.docked_ship = None
+        ship.dock_state = DockState.NONE
+        if other is not None and other.docked_ship is ship:
+            other.docked_ship = None
+            other.dock_state = DockState.NONE
+
+    def _finish_dock(self, ship: Ship, notes: List[Broadcast]) -> None:
+        """SWL dockship: two ticks after the approach starts, the hulls lock."""
+        target = ship.docked_ship
+        if target is None or target.starsystem is not ship.starsystem:
+            self._echo_cockpit(ship, "Docking aborted. The other ship is gone.", notes)
+            self._clear_dock(ship)
+            return
+        ship.dock_state = DockState.DOCK_3
+        target.dock_state = DockState.DOCK_3
+        ship.vx, ship.vy, ship.vz = target.vx, target.vy, target.vz
+        ship.currspeed = 0
+        target.currspeed = 0
+        self._echo_cockpit(ship, "Docking sequence complete.", notes)
+        self._echo_ship(ship, "You feel a slight thud as the ship locks in with the next.", notes)
+        self._echo_cockpit(target, "Docking sequence complete.", notes)
+        self._echo_ship(target, "You feel a slight thud as the ship locks in with the next.", notes)
+        self._echo_system(
+            ship.starsystem, f"{ship.name} and {target.name} have docked.", notes
+        )
+
+    def _dock_block(self, ship: Ship) -> Optional[str]:
+        """Why a maneuver can't start while docking is under way or finished."""
+        if ship.docking_in_progress():
+            return "Not while docking procedures are going on."
+        if ship.is_docked_with() is not None:
+            return "Detach from the docked ship first."
+        return None
 
     def _finish_land(self, ship: Ship, notes: List[Broadcast]) -> None:
         pad = None
@@ -1323,7 +1575,11 @@ class GarageEngine:
             "fire": self.cmd_fire,
             "recharge": self.cmd_recharge,
             "autopilot": self.cmd_autopilot,
+            "docking": self.cmd_docking,
+            "dock": self.cmd_docking,
+            "detach": self.cmd_detach,
             "map": self.cmd_map,
+            "return": self.cmd_return,
             "rename": self.cmd_rename,
             "cargo": self.cmd_cargo,
             "hold": self.cmd_cargo,
@@ -1366,6 +1622,10 @@ class GarageEngine:
         lines = []
         if aboard:
             lines.append(f"You are inside {aboard.name}.")
+            if aboard.is_docked_with() is not None:
+                lines.append(
+                    f"Docked with {aboard.docked_ship.name}. Type 'board dock' to cross over."
+                )
         if parked:
             lines.append("Parked here:")
             for ship in parked:
@@ -1490,6 +1750,8 @@ class GarageEngine:
         return self._result(result_cls, f"You close up the {ship.name}.", notes)
 
     def cmd_board(self, player, args, result_cls):
+        if args.strip().lower() == "dock":
+            return self._board_docked(player, result_cls)
         ship, err = self._ship_at_hand(player, args, result_cls, "board")
         if err:
             return err
@@ -1515,6 +1777,118 @@ class GarageEngine:
             f"You enter {ship.name}.\n{cockpit.get_description(current_player=player.name)}",
             notes,
         )
+
+    def _board_docked(self, player, result_cls):
+        """SWL 'board dock': cross the airlock into the ship you're locked to."""
+        in_ship = self.ship_from_cockpit(player.current_room)
+        if in_ship is None:
+            if self.ship_from_interior(player.current_room) is not None:
+                return self._result(result_cls, "The airlock is in the cockpit. Head north.")
+            return self._result(result_cls, "You need to be at the entrance.")
+        if in_ship.is_docked_with() is None:
+            if in_ship.docking_in_progress():
+                return self._result(result_cls, "Wait until docking sequence is complete.")
+            return self._result(result_cls, "This ship isn't currently docked.")
+        ship = in_ship.docked_ship
+        cockpit = self.rooms.get(ship.cockpit_room)
+        here = self.rooms.get(player.current_room)
+        if not cockpit or not here:
+            return self._result(result_cls, "That ship has no entrance!")
+        here.players.discard(player.name)
+        player.current_room = cockpit.id
+        cockpit.players.add(player.name)
+        notes = [
+            Broadcast(here.id, f"{player.name} enters {ship.name}."),
+            Broadcast(cockpit.id, f"{player.name} enters the ship."),
+        ]
+        return self._result(
+            result_cls,
+            f"You enter {ship.name}.\n{cockpit.get_description(current_player=player.name)}",
+            notes,
+        )
+
+    def cmd_docking(self, player, args, result_cls):
+        """SWL do_docking: pull alongside another ship and lock hulls."""
+        ship, err = self._need_ship(player, result_cls)
+        if err:
+            return err
+        if ship.state == ShipState.DISABLED:
+            return self._result(result_cls, "The ship's drive is disabled. Unable to dock.")
+        if ship.docked_ship is not None:
+            return self._result(result_cls, "The ship is already docked!")
+        if ship.state == ShipState.HYPERSPACE:
+            return self._result(result_cls, "You can only do that in realspace!")
+        if not self._can_maneuver(ship):
+            return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
+        if ship.starsystem is None:
+            return self._result(result_cls, "Dock with whom?")
+        if not args.strip():
+            return self._result(result_cls, "Dock with who?")
+        target = None
+        for candidate in ship.starsystem.ships:
+            if candidate is not ship and candidate.matches(args):
+                target = candidate
+                break
+        if target is None:
+            if ship.matches(args):
+                return self._result(result_cls, "You can't dock your ship inside itself!")
+            return self._result(result_cls, "That ship isn't here!")
+        if target.docked_ship is not None:
+            return self._result(result_cls, "That ship is already docked!")
+        if target.state in (ShipState.LAND, ShipState.LAND_2, ShipState.HYPERSPACE):
+            return self._result(result_cls, "That ship isn't here!")
+        if (
+            abs(target.vx - ship.vx) > DOCK_RANGE
+            or abs(target.vy - ship.vy) > DOCK_RANGE
+            or abs(target.vz - ship.vz) > DOCK_RANGE
+        ):
+            return self._result(
+                result_cls,
+                "That ship is too far away! You'll have to fly a little closer.",
+            )
+        ship.dock_state = DockState.DOCK
+        ship.currspeed = 0
+        target.dock_state = DockState.DOCK
+        target.currspeed = 0
+        ship.docked_ship = target
+        target.docked_ship = ship
+        notes: List[Broadcast] = []
+        self._echo_ship(
+            target,
+            f"You are being docked by {ship.name}.\nDocking sequence initiated.",
+            notes,
+        )
+        self._echo_cockpit(ship, f"{player.name} begins the docking sequence.", notes)
+        self._echo_ship(ship, "The ship slowly begins its docking approach.", notes)
+        return self._result(result_cls, "Docking sequence initiated.", notes)
+
+    def cmd_detach(self, player, args, result_cls):
+        """SWL do_detach: open the airlocks and let the other hull go."""
+        ship = self.ship_from_cockpit(player.current_room)
+        if ship is None:
+            return self._result(result_cls, "You don't seem to be in the pilot seat!")
+        if ship.automated:
+            return self._result(
+                result_cls,
+                "The autopilot won't release the lock from this side. "
+                "Get back to your own ship and detach.",
+            )
+        other = ship.docked_ship
+        if other is None:
+            return self._result(result_cls, "There doesn't seem to be any ships docked to you.")
+        self._clear_dock(ship)
+        notes: List[Broadcast] = []
+        self._echo_ship(
+            ship,
+            f"You hear air escaping as the airlocks open, and {other.name} detaches.",
+            notes,
+        )
+        self._echo_ship(
+            other,
+            f"You hear air escaping as the airlocks open, and {ship.name} detaches.",
+            notes,
+        )
+        return self._result(result_cls, f"You detach from {other.name}.", notes)
 
     def cmd_leaveship(self, player, args, result_cls):
         ship = self.ship_from_cockpit(player.current_room)
@@ -1544,6 +1918,84 @@ class GarageEngine:
             f"You exit {ship.name}.\n{pad.get_description(current_player=player.name)}{extra}",
             notes,
         )
+
+    def cmd_return(self, player, args, result_cls):
+        """Send the empty rental back to the garage so the next pilot can take it."""
+        ship = self.ship_from_interior(player.current_room)
+        aboard = ship is not None
+        if ship is not None and not self._is_public(ship):
+            return self._result(
+                result_cls,
+                "Only the rental goes back to the garage. Your ship stays where you leave it.",
+            )
+        if ship is None:
+            parked = [s for s in self.ships_at(player.current_room) if self._is_public(s)]
+            ship = parked[0] if parked else None
+        if ship is None:
+            return self._result(result_cls, "The rental ship isn't here.")
+        if ship.state != ShipState.DOCKED:
+            return self._result(
+                result_cls, "Land it first, then send it back to the garage."
+            )
+        if ship.location == GARAGE_ROOM_ID:
+            return self._result(
+                result_cls, f"The {ship.name} is already at the garage."
+            )
+        others = [name for name in self._players_aboard(ship) if name != player.name]
+        if others:
+            return self._result(
+                result_cls, "Someone is still aboard. They need to step out first."
+            )
+
+        notes: List[Broadcast] = []
+        stepped_out = ""
+        if aboard:
+            pad = self.rooms.get(ship.location)
+            if pad is None:
+                return self._result(result_cls, "The landing pad is missing.")
+            room = self.rooms.get(player.current_room)
+            if room is not None:
+                room.players.discard(player.name)
+            player.current_room = pad.id
+            pad.players.add(player.name)
+            stepped_out = "You step out. "
+        self._park_rental_at_garage(ship, notes)
+        return self._result(
+            result_cls,
+            stepped_out
+            + f"The {ship.name} lifts off by itself and heads back to the garage.",
+            notes,
+        )
+
+    def _park_rental_at_garage(self, ship: Ship, notes: List[Broadcast]) -> None:
+        origin = ship.location
+        self._leave_system(ship)
+        ship.orbit = None
+        ship.state = ShipState.DOCKED
+        ship.location = GARAGE_ROOM_ID
+        ship.lastdoc = GARAGE_ROOM_ID
+        ship.hatch_open = False
+        ship.locked = True
+        ship.currspeed = 0
+        ship.autopilot = False
+        ship.target = None
+        ship.dest = ""
+        ship.currjump = None
+        ship.hyperdistance = 0
+        ship.hull = ship.maxhull
+        ship.shield = 0
+        ship.missiles = ship.maxmissiles
+        ship.laser_cool = 0
+        self.save_ships()
+        if origin and origin != GARAGE_ROOM_ID:
+            notes.append(Broadcast(
+                origin,
+                f"The {ship.name} lifts off by itself and heads back to the garage.",
+            ))
+        notes.append(Broadcast(
+            GARAGE_ROOM_ID,
+            f"The {ship.name} sets down. The rental is ready for another pilot.",
+        ))
 
     def cmd_launch(self, player, args, result_cls):
         ship, err = self._need_ship(player, result_cls)
@@ -1584,6 +2036,10 @@ class GarageEngine:
             return err
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
+        if ship.docking_in_progress():
+            return self._result(result_cls, "Wait until after docking procedures are complete.")
+        if ship.is_docked_with() is not None:
+            return self._result(result_cls, "Detach from the docked ship first.")
         if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         if not args.strip():
@@ -1626,6 +2082,10 @@ class GarageEngine:
             f"Current Target: {target}",
             f"Autopilot: {'on' if ship.autopilot else 'off'}   Door: {'open' if ship.hatch_open else 'shut'}",
         ]
+        if ship.is_docked_with() is not None:
+            lines.append(f"Docked with: {ship.docked_ship.name}")
+        elif ship.docking_in_progress() and ship.docked_ship is not None:
+            lines.append(f"Docking with: {ship.docked_ship.name} (in progress)")
         if ship.is_skipjack():
             lines.append(
                 f"Hyperdrive: {ship.hyperspeed}   Cargo: "
@@ -1655,13 +2115,21 @@ class GarageEngine:
             lines.append(f"  STAR {star.name:20} {star.x:6} {star.y:6} {star.z:6}  range {dist:.0f}")
         for planet in ship.starsystem.planets:
             dist = _distance(ship.vx, ship.vy, ship.vz, planet.x, planet.y, planet.z)
-            lines.append(f"  PLANET {planet.name:18} {planet.x:6} {planet.y:6} {planet.z:6}  range {dist:.0f}")
+            lines.append(
+                f"  {planet.label:8}{planet.name:17} {planet.x:6} {planet.y:6} {planet.z:6}  "
+                f"range {dist:.0f}"
+            )
         for other in ship.starsystem.ships:
             if other is ship:
                 continue
             dist = _distance(ship.vx, ship.vy, ship.vz, other.vx, other.vy, other.vz)
+            tag = ""
+            if other.automated:
+                tag = "  autopilot"
+            elif other.is_docked_with() is not None:
+                tag = f"  docked with {other.docked_ship.name}"
             lines.append(
-                f"  SHIP {other.name:20} {other.vx:6.0f} {other.vy:6.0f} {other.vz:6.0f}  range {dist:.0f}"
+                f"  SHIP {other.name:20} {other.vx:6.0f} {other.vy:6.0f} {other.vz:6.0f}  range {dist:.0f}{tag}"
             )
         return self._result(result_cls, "\n".join(lines))
 
@@ -1671,6 +2139,9 @@ class GarageEngine:
             return err
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
+        blocked = self._dock_block(ship)
+        if blocked:
+            return self._result(result_cls, blocked)
         if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         parts = args.split()
@@ -1695,6 +2166,9 @@ class GarageEngine:
             return err
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
+        blocked = self._dock_block(ship)
+        if blocked:
+            return self._result(result_cls, blocked)
         if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         if not args.strip():
@@ -1718,6 +2192,9 @@ class GarageEngine:
             return self._result(result_cls, "You can only do that in realspace.")
         if ship.state == ShipState.HYPERSPACE:
             return self._result(result_cls, "You can only do that in realspace!")
+        blocked = self._dock_block(ship)
+        if blocked:
+            return self._result(result_cls, blocked)
         if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         parts = args.split()
@@ -1769,6 +2246,9 @@ class GarageEngine:
         ship, err = self._need_ship(player, result_cls)
         if err:
             return err
+        blocked = self._dock_block(ship)
+        if blocked:
+            return self._result(result_cls, blocked)
         if not self._can_maneuver(ship):
             return self._result(result_cls, "Please wait until the ship has finished its current maneuver.")
         if ship.currjump is None or ship.hyperdistance <= 0:
@@ -1813,6 +2293,11 @@ class GarageEngine:
         if target.starsystem is not ship.starsystem:
             ship.target = None
             return self._result(result_cls, "Your target seems to have left.")
+        if target.automated:
+            return self._result(
+                result_cls,
+                f"{target.name} doesn't answer your guns. Its course never wavers.",
+            )
         weapon = (args or "lasers").split()[0].lower()
         dist = _distance(ship.vx, ship.vy, ship.vz, target.vx, target.vy, target.vz)
         notes: List[Broadcast] = []
@@ -1864,6 +2349,13 @@ class GarageEngine:
                     f"{name} is thrown clear as {ship.name} comes apart, "
                     f"and wakes up back in the garage.",
                 ))
+        if ship.docked_ship is not None:
+            self._echo_ship(
+                ship.docked_ship,
+                f"{ship.name} tears free of the airlock as it comes apart.",
+                notes,
+            )
+            self._clear_dock(ship)
         self._leave_system(ship)
         ship.orbit = None
         ship.state = ShipState.DOCKED
@@ -2531,7 +3023,11 @@ BACK GARAGE (south of Slick's Surplus):
   land                  - List stops; land <name> within 200 units
   target / fire lasers  - Combat
   recharge / autopilot  - Shields and auto
+  docking <ship>        - Lock hulls with a ship within 200 units (dock)
+  board dock / detach   - Cross the airlock / let the other ship go
+  The Drifter           - Unmanned. Cruises 5 minutes, then jumps. Dock for the gem.
   leave / leaveship     - After you set down and open up
+  return                - Send the empty rental back to the garage
 
 SKIPJACK (any pad off Earth):
   list / buy ship / sell ship   - 10000g hull, one per pilot, sells hull + modules

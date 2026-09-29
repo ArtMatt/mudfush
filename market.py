@@ -725,9 +725,6 @@ class Market:
             lines.append("  BUBBA'S BAIT & TACKLE - PRICES")
             lines.append("="*50)
             lines.append("\nFair prices, honest deals!\n")
-            for quest_line in self.get_bubba_quest_status_lines():
-                lines.append(quest_line)
-            lines.append("")
         else:
             lines.append("\n" + "="*50)
             lines.append("  SLICK'S SURPLUS - TODAY'S PRICES")
@@ -844,6 +841,12 @@ class Market:
             )
         if store == StoreType.SLICK and wisdom >= 3:
             lines.append("Check back often—Slick's prices move a lot.")
+        if store == StoreType.BUBBA:
+            # Last so it is on screen without scrolling back up
+            quest_lines = self.get_bubba_quest_status_lines()
+            if quest_lines:
+                lines.append("\nBUBBA'S BOUNTY:")
+                lines.extend(quest_lines)
         
         return "\n".join(lines)
 
