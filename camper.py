@@ -74,8 +74,18 @@ PUBLIC_OWNER = "Public"
 DRIFTER_SHIP_ID = "drifter"
 DRIFTER_NAME = "The Drifter"
 DRIFTER_OWNER = "Autopilot"
+DRIFTER_COCKPIT_ROOM = "drifter_cockpit"
 DRIFTER_CRUISE_SECONDS = 5 * 60
 SHIPS_PATH = Path("saves/.ships.json")
+
+
+def ground_cleanup_keeps(room) -> list:
+    """The Drifter's gem is not ground clutter. Sweeps leave it in the cockpit."""
+    if getattr(room, "id", None) != DRIFTER_COCKPIT_ROOM:
+        return []
+    from items import ItemType
+
+    return [item for item in room.items if item.item_type == ItemType.GEM]
 
 # Hulls. The Airstream is the garage rental; the Skipjack is the two-room
 # ship players buy and sell at any pad off Earth.
@@ -1153,7 +1163,7 @@ class GarageEngine:
             name=DRIFTER_NAME,
             owner=DRIFTER_OWNER,
             ship_id=DRIFTER_SHIP_ID,
-            cockpit_room="drifter_cockpit",
+            cockpit_room=DRIFTER_COCKPIT_ROOM,
             hull_type=HULL_SKIPJACK,
             locked=False,
             hatch_open=False,
@@ -1229,7 +1239,7 @@ class GarageEngine:
         ship.state = ShipState.HYPERSPACE
         if origin is not None:
             self._echo_system(
-                origin, f"{ship.name} vanishes into hyperspace, bound for {dest.name}.", notes
+                origin, f"{ship.name} vanishes into hyperspace.", notes
             )
         self._leave_system(ship)
         self._echo_cockpit(
@@ -1675,7 +1685,7 @@ class GarageEngine:
                     result_cls,
                     "The padlock is rusted but solid. You'd need the key for it.",
                 )
-            return self._result(result_cls, "That's not your camper.")
+            return self._result(result_cls, "You can't unlock someone else's ship.")
         ship.locked = False
         self.save_ships()
         if self._is_public(ship):
@@ -1700,7 +1710,7 @@ class GarageEngine:
         if not self._controls_lock(player, ship):
             if self._is_public(ship):
                 return self._result(result_cls, "You don't have the key for that padlock.")
-            return self._result(result_cls, "That's not your camper.")
+            return self._result(result_cls, "You can't lock someone else's ship.")
         if ship.state != ShipState.DOCKED:
             return self._result(result_cls, "Not while it's out on the road.")
         if self._players_aboard(ship):
@@ -1729,6 +1739,8 @@ class GarageEngine:
             return self._result(result_cls, "Please wait till the ship is properly docked.")
         if ship.hatch_open:
             return self._result(result_cls, "The door is already open.")
+        if not self._is_public(ship) and ship.owner.lower() != player.name.lower():
+            return self._result(result_cls, "You can't open someone else's ship.")
         ship.hatch_open = True
         notes = [
             Broadcast(ship.location, f"The door on the {ship.name} swings open."),
@@ -2011,6 +2023,8 @@ class GarageEngine:
                 )
             player.gold -= RENT_GOLD
             rent_line = f"You pay {RENT_GOLD} gold to rent the ship.\n"
+        elif ship.owner.lower() != player.name.lower():
+            return self._result(result_cls, "You can't launch someone else's ship.")
         else:
             rent_line = ""
         notes = []

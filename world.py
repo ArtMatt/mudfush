@@ -7,7 +7,12 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from camper import GARAGE_ROOM_IDS, add_garage_to_world
+from camper import (
+    DRIFTER_COCKPIT_ROOM,
+    GARAGE_ROOM_IDS,
+    add_garage_to_world,
+    ground_cleanup_keeps,
+)
 from items import (
     Item, TACKLE_BOX, OLD_BOOT, PLASTIC_WORM, NIGHTCRAWLERS,
     MINNOWS, WEARABLE_ITEMS, create_item_copy,
@@ -20,6 +25,7 @@ TRUCK_ROOM_ID = "parking_lot"
 NO_GROUND_LOOT_ROOMS = frozenset({
     "store", "slick_store", "slick_backroom", "jail", "bubba_workshop",
     TRUCK_ROOM_ID,
+    DRIFTER_COCKPIT_ROOM,
 }) | GARAGE_ROOM_IDS
 
 # Common ground finds (item template, relative weight)
@@ -165,7 +171,9 @@ def reset_ground_items(rooms: Dict[str, Room]) -> Dict[str, int]:
     Returns counts: {"common": n, "clothing": n}.
     """
     for room in rooms.values():
+        kept = ground_cleanup_keeps(room)
         room.items.clear()
+        room.items.extend(kept)
 
     common_count = 0
     clothing_count = 0
@@ -187,6 +195,18 @@ def reset_ground_items(rooms: Dict[str, Room]) -> Dict[str, int]:
         clothing_count += 1
 
     return {"common": common_count, "clothing": clothing_count}
+
+
+def take_ground_items(room: Room) -> bool:
+    """
+    Remove items on the ground. Leave the Drifter's gem.
+    True when something was actually taken.
+    """
+    kept = ground_cleanup_keeps(room)
+    if len(kept) == len(room.items):
+        return False
+    room.items[:] = kept
+    return True
 
 
 def create_world() -> Dict[str, Room]:

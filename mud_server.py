@@ -18,7 +18,10 @@ from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 
 from camper import FISHING_HOLE_IDS, GarageEngine
-from world import create_world, Room, reset_ground_items, population_shift_message
+from world import (
+    create_world, Room, reset_ground_items, take_ground_items,
+    population_shift_message,
+)
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
 from weather import WeatherSystem, WeatherType
@@ -730,9 +733,10 @@ class FishingMUD:
         for room in self.rooms.values():
             if not room.items:
                 continue
+            if not take_ground_items(room):
+                continue
             if room.players:
                 await self.broadcast_to_room(room.id, message)
-            room.items = []
             cleared += 1
         return cleared
     
