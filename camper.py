@@ -819,6 +819,7 @@ class GarageEngine:
         self.ships = default_ships(self.systems)
         self._ticks = 0
         self.eject_queue: List[Tuple[str, str]] = []
+        self.regional_weather = None  # RegionalWeather, set by attach_weather
         self._pad_index: Dict[str, LandingPad] = {}
         for system in self.systems:
             for pad in system.pads():
@@ -832,6 +833,97 @@ class GarageEngine:
         self.rooms = rooms
         self.ensure_cockpit_rooms()
         self._stock_drifter_gem()
+
+    # -- weather ---------------------------------------------------------------
+
+    def attach_weather(self, earth_weather):
+        """Give every body off Earth its own hourly sky. Earth keeps the lake's."""
+        from weather import RegionalWeather
+
+        names = [
+            planet.name for system in self.systems for planet in system.planets
+        ]
+        self.regional_weather = RegionalWeather(earth_weather, names)
+        return self.regional_weather
+
+    def planet_for_room(self, room_id: str) -> Optional[Planet]:
+        """The body under a pad, its fishing hole, or a ship parked at one."""
+        ship = self.ship_from_interior(room_id)
+        if ship is not None:
+            if ship.state != ShipState.DOCKED or not ship.location:
+                return None
+            room_id = ship.location
+        if room_id.endswith("_hole"):
+            room_id = room_id[: -len("_hole")]
+        pad = self.pad_for_room(room_id)
+        system = self.system_for_pad(room_id)
+        if pad is None or system is None:
+            return None
+        return system.planet_near(pad)
+
+    def weather_for_room(self, room_id: str):
+        """The sky over this room. None aboard a ship that is not parked."""
+        if self.regional_weather is None:
+            return None
+        ship = self.ship_from_interior(room_id)
+        if ship is not None and (ship.state != ShipState.DOCKED or not ship.location):
+            return None
+        planet = self.planet_for_room(room_id)
+        return self.regional_weather.for_planet(planet.name if planet else None)
+
+    def fishing_planets(self) -> List[Planet]:
+        """Bodies with water to fish: Earth's lake and every pad with a hole."""
+        found: List[Planet] = []
+        for system in self.systems:
+            for planet in system.planets:
+                for pad in planet.pads:
+                    if pad.room_id == GARAGE_ROOM_ID or f"{pad.room_id}_hole" in FISHING_HOLE_IDS:
+                        found.append(planet)
+                        break
+        return found
+
+    def rooms_on_planet(self, name: str) -> List[str]:
+        """Pad and fishing-hole rooms on a body, for weather announcements."""
+        rooms: List[str] = []
+        for system in self.systems:
+            for planet in system.planets:
+                if planet.name != name:
+                    continue
+                for pad in planet.pads:
+                    rooms.append(pad.room_id)
+                    hole = f"{pad.room_id}_hole"
+                    if hole in FISHING_HOLE_IDS:
+                        rooms.append(hole)
+        return rooms
+
+    def radio_report(self, player, result_cls):
+        """From a cockpit: every fishing planet's sky and what each buyer wants."""
+        if self.ship_from_cockpit(player.current_room) is None:
+            return self._result(result_cls, "You don't have a radio.")
+        lines = [
+            "You tune the radio. Static, then a flat voice reading the boards.",
+            "",
+            "WEATHER",
+        ]
+        if self.regional_weather is None:
+            lines.append("  No weather reports today.")
+        else:
+            for planet in self.fishing_planets():
+                sky = self.regional_weather.for_planet(planet.name).get_current_weather()
+                lines.append(f"  {planet.name:<10} {sky.name}")
+        lines.extend(["", "BUYERS"])
+        for pad in REMOTE_PADS:
+            buyer = pad.get("buyer")
+            if not buyer:
+                continue
+            wanted_id = buyer_species_id(buyer)
+            wanted = _fish_named(wanted_id)
+            species = wanted.name if wanted else wanted_id
+            system = self.system_for_pad(pad["id"])
+            where = f"{pad['name']}, {system.name}" if system else pad["name"]
+            lines.append(f"  {buyer['name']:<8} {species:<18} {where}")
+        lines.append(f"  Boards change in {_format_remaining(cycle_remaining())}.")
+        return self._result(result_cls, "\n".join(lines))
 
     def owned_ship_for(self, player_name: str) -> Optional[Ship]:
         for ship in self.ships:
@@ -3031,6 +3123,7 @@ BACK GARAGE (south of Slick's Surplus):
   board airstream       - Climb in
   launch                - Pull out
   status / radar        - Instruments
+  radio                 - Weather on each fishing planet and what the buyers want
   trajectory <x> <y> <z> / accelerate <speed> (acc)
   calculate (cal) [system x y z] / hyperspace (hyper)
   map                   - Star map; + marks the system you're in

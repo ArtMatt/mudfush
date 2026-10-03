@@ -24,7 +24,7 @@ from world import (
 )
 from player import Player, PlayerManager
 from commands import GameCommands, CommandResult
-from weather import WeatherSystem, WeatherType
+from weather import PLANET_WEATHER_SECONDS, WeatherSystem, WeatherType
 from market import Market
 from lake_state import LakeCycleState
 from fishermen import FISHERMEN, FishermanManager, NPC_CATCH_MAX_SECONDS
@@ -83,12 +83,14 @@ class FishingMUD:
             fishermen=self.fishermen,
         )
         self.garage = GarageEngine(self.rooms)
+        self.garage.attach_weather(self.weather)
         self.commands.garage = self.garage
         self.commands.ceelo_tip_handler = self.join_ceelo
         self.commands.ceelo_roll_handler = self.roll_ceelo
         self.sessions: Dict[str, 'MUDSession'] = {}  # player_name -> session
         self._autosave_task = None
         self._weather_task = None
+        self._planet_weather_task = None
         self._population_task = None
         self._ground_loot_task = None
         self._scavenger_task = None
@@ -476,6 +478,22 @@ class FishingMUD:
 
         self._weather_task = asyncio.create_task(weather_loop())
         logger.info(f"Weather updates started (every {interval} seconds)")
+
+    async def start_planet_weather(self, interval: int = PLANET_WEATHER_SECONDS):
+        """Every body off Earth turns its own sky on an hourly clock."""
+        async def planet_weather_loop():
+            while True:
+                await asyncio.sleep(interval)
+                for name, old, new in self.garage.regional_weather.change_planets():
+                    if old.weather_type == new.weather_type:
+                        continue
+                    message = self.weather.get_weather_change_message(old, new)
+                    for room_id in self.garage.rooms_on_planet(name):
+                        await self.broadcast_to_room(room_id, message)
+                    logger.info(f"{name} weather changed: {old.name} -> {new.name}")
+
+        self._planet_weather_task = asyncio.create_task(planet_weather_loop())
+        logger.info(f"Planet weather started (every {interval // 60} minutes)")
     
     async def start_market(self, interval: int = 600):
         """Start the market system (updates every 10 minutes)."""
@@ -753,6 +771,9 @@ class FishingMUD:
         if self._weather_task:
             self._weather_task.cancel()
             self._weather_task = None
+        if self._planet_weather_task:
+            self._planet_weather_task.cancel()
+            self._planet_weather_task = None
         self.market.stop()
         if self._population_task:
             self._population_task.cancel()
@@ -2203,7 +2224,8 @@ async def start_server(host: str = '0.0.0.0', port: int = 2222):
     
     # Start background systems
     await game.start_autosave(interval=300)  # Save every 5 minutes
-    await game.start_weather(interval=180)  # Weather every 3 min
+    await game.start_weather(interval=180)  # Earth weather every 3 min
+    await game.start_planet_weather()  # Other planets every hour
     await game.start_market(interval=600)  # Market updates every 10 min
     await game.start_population_updates(interval=300)  # Fish every 5 min
     await game.start_ground_loot_resets(interval=3600)  # Ground items every hour

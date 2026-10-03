@@ -8,7 +8,7 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Callable, Optional
+from typing import Deque, Dict, Iterable, List, Callable, Optional, Tuple
 from enum import Enum
 
 
@@ -200,11 +200,12 @@ class WeatherSystem:
             return []
         return list(self.forecast)[:count]
     
-    def get_weather_display(self, upcoming: int = 0) -> str:
+    def get_weather_display(self, upcoming: int = 0, place: Optional[str] = None) -> str:
         """Get a formatted weather display, optionally with a mental forecast."""
         w = self.current_weather
+        where = f" on {place}" if place else ""
         lines = [
-            f"\nWeather: {w.name}",
+            f"\nWeather{where}: {w.name}",
             f"{w.description}",
             f"Fishing: {w.affects_message}",
         ]
@@ -328,3 +329,38 @@ class WeatherSystem:
         if self._task:
             self._task.cancel()
             self._task = None
+
+
+PLANET_WEATHER_SECONDS = 60 * 60
+EARTH = "Earth"
+
+
+class RegionalWeather:
+    """
+    Earth keeps the lake's own weather. Every other body gets an
+    independent sky that advances once an hour.
+    """
+
+    def __init__(self, earth: WeatherSystem, planets: Iterable[str]):
+        self.earth = earth
+        self.planets: Dict[str, WeatherSystem] = {}
+        for name in planets:
+            if name == EARTH or name in self.planets:
+                continue
+            system = WeatherSystem()
+            system.reset_to(random.choice(list(WEATHER_DATA)))
+            self.planets[name] = system
+
+    def for_planet(self, name: Optional[str]) -> WeatherSystem:
+        """The sky over a body. Earth, or an unknown name, is the lake's."""
+        if name is None or name == EARTH:
+            return self.earth
+        return self.planets.get(name, self.earth)
+
+    def change_planets(self) -> List[Tuple[str, Weather, Weather]]:
+        """Advance every off-Earth sky. Returns (planet, old, new) per body."""
+        changes: List[Tuple[str, Weather, Weather]] = []
+        for name, system in self.planets.items():
+            old, new = system.change_weather()
+            changes.append((name, old, new))
+        return changes

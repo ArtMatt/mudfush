@@ -280,6 +280,7 @@ class GameCommands:
             "help": self.cmd_help,
             "?": self.cmd_help,
             "weather": self.cmd_weather,
+            "radio": self.cmd_radio,
             "buy": self.cmd_buy,
             "list": self.cmd_list,
             "sell": self.cmd_sell,
@@ -2437,8 +2438,9 @@ class GameCommands:
         fish_modifier = 1.0
         rare_modifier = 1.0
         weather_msg = ""
-        if self.weather:
-            weather = self.weather.get_current_weather()
+        sky = self._weather_for_room(room.id)
+        if sky:
+            weather = sky.get_current_weather()
             fish_modifier = weather.fish_modifier
             rare_modifier = weather.rare_fish_modifier
             weather_msg = f" ({weather.name} weather)"
@@ -2627,8 +2629,9 @@ class GameCommands:
         population = room.population or 0
         fish_modifier = 1.0
         rare_modifier = 1.0
-        if self.weather:
-            weather = self.weather.get_current_weather()
+        sky = self._weather_for_room(room.id)
+        if sky:
+            weather = sky.get_current_weather()
             fish_modifier = weather.fish_modifier
             rare_modifier = weather.rare_fish_modifier
         if population in (0, 100):
@@ -2870,8 +2873,9 @@ class GameCommands:
 
         rare_modifier = 1.0
         weather = None
-        if self.weather:
-            weather = self.weather.get_current_weather()
+        sky = self._weather_for_room(room.id)
+        if sky:
+            weather = sky.get_current_weather()
             rare_modifier = weather.rare_fish_modifier
 
         table = self._adjusted_catch_table(
@@ -3586,7 +3590,7 @@ FISHING:
   release <fish/#>    - Pay the lake; the commotion draws fish
   appraise/app [fish/#] - Estimate one fish or all fish at Bubba's prices
   chum/dump chum       - Use one scoop (a bucket holds 10) to briefly improve this spot
-  weather             - Check weather
+  weather             - Check weather where you stand
   (While reeling: type CUT or press Ctrl-G to snap the line)
 
 SHOPPING (at Bubba's or Slick's):
@@ -3630,14 +3634,34 @@ TIPS:
             return StoreType.SLICK
         return None
     
+    def _weather_for_room(self, room_id: str):
+        """The sky over a room: Earth's lake weather or that planet's own."""
+        if self.garage and self.garage.regional_weather is not None:
+            return self.garage.weather_for_room(room_id)
+        return self.weather
+
     def cmd_weather(self, player: Player, args: str) -> CommandResult:
         """Check the current weather, and upcoming patterns with Int+Wis."""
-        if not self.weather:
+        sky = self._weather_for_room(player.current_room)
+        if not sky:
+            if self.garage and self.garage.ship_from_interior(player.current_room):
+                return CommandResult("There's no sky in here. Try the RADIO.")
             return CommandResult("Weather system not available.")
+        place = None
+        if self.garage:
+            planet = self.garage.planet_for_room(player.current_room)
+            if planet is not None and planet.name != "Earth":
+                place = planet.name
         intelligence = player.get_effective_attribute("intelligence")
         wisdom = player.get_effective_attribute("wisdom")
         upcoming = min(5, (intelligence + wisdom) // 4)
-        return CommandResult(self.weather.get_weather_display(upcoming))
+        return CommandResult(sky.get_weather_display(upcoming, place=place))
+
+    def cmd_radio(self, player: Player, args: str) -> CommandResult:
+        """From a cockpit: planet weather and what each cargo buyer wants."""
+        if not self.garage or not self.garage.ship_from_cockpit(player.current_room):
+            return CommandResult("You don't have a radio.")
+        return self.garage.radio_report(player, CommandResult)
     
     def cmd_buy(self, player: Player, item_name: str) -> CommandResult:
         """Buy an item from a store by name or list number."""
